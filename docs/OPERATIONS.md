@@ -96,6 +96,7 @@ La rétention est appliquée automatiquement à chaque backup. Pour la modifier,
 RETENTION_KEEP_DAILY=7    # 7 backups quotidiens
 RETENTION_KEEP_WEEKLY=4   # 4 backups hebdomadaires
 RETENTION_KEEP_MONTHLY=6  # 6 backups mensuels
+RETENTION_KEEP_YEARLY=2   # 2 backups annuels
 ```
 
 ### Appliquer manuellement une rétention
@@ -105,7 +106,8 @@ restic forget --prune \
     --keep-daily 7 \
     --keep-weekly 4 \
     --keep-monthly 6 \
-    --tag "host:vps-prod-01" \
+    --keep-yearly 2 \
+    --host "vps-prod-01" \
     --group-by "host,tags"
 ```
 

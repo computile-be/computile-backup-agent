@@ -46,6 +46,7 @@ EXCLUDE_FILE="/etc/computile-backup/excludes.txt"
 RETENTION_KEEP_DAILY=7
 RETENTION_KEEP_WEEKLY=4
 RETENTION_KEEP_MONTHLY=6
+RETENTION_KEEP_YEARLY=2
 
 # ──────────────────────────────────────────────
 # Docker & database discovery
@@ -62,7 +63,23 @@ REDIS_SNAPSHOT_ENABLED="no"    # "yes" to enable Redis BGSAVE snapshots
 DUMP_CLEANUP_DAYS=3
 
 # ──────────────────────────────────────────────
-# Manual database entries (optional)
+# Host-level databases (Forge, bare metal, etc.)
+# ──────────────────────────────────────────────
+# Enable this for servers where MySQL/PostgreSQL runs directly on the host
+# (not in Docker containers). Common with Laravel Forge, Ploi, etc.
+HOST_DB_ENABLED="no"
+
+# MySQL/MariaDB host credentials
+# HOST_MYSQL_USER="root"
+# HOST_MYSQL_PASS_FILE="/etc/computile-backup/mysql-password"
+# HOST_MYSQL_DATABASES=""       # comma-separated, empty = all non-system DBs
+
+# PostgreSQL host credentials (uses sudo -u for peer auth)
+# HOST_POSTGRES_USER="postgres"
+# HOST_POSTGRES_DATABASES=""    # comma-separated, empty = all non-template DBs
+
+# ──────────────────────────────────────────────
+# Manual database entries (optional, Docker only)
 # ──────────────────────────────────────────────
 # Format: "container_name|db_type|user|password|databases"
 # - db_type: mysql, postgres, redis
@@ -88,6 +105,25 @@ SMTP_HOST="ssl0.ovh.net"
 SMTP_PORT="587"
 SMTP_USER="backup@computile.email"
 SMTP_PASS_FILE="/etc/computile-backup/smtp-password"
+
+# ──────────────────────────────────────────────
+# Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
+# ──────────────────────────────────────────────
+# Pings this URL on success, or URL/fail on failure.
+# Leave empty to disable.
+# HEALTHCHECK_URL="https://hc-ping.com/your-uuid-here"
+
+# ──────────────────────────────────────────────
+# Bandwidth & performance
+# ──────────────────────────────────────────────
+# Limit upload speed in KB/s (0 = unlimited)
+# RESTIC_UPLOAD_LIMIT_KB=0
+
+# Number of retries on transient SFTP failures (default: 2)
+# RESTIC_RETRY_COUNT=2
+
+# Minimum free disk space in MB before starting dumps (default: 500)
+# DUMP_MIN_SPACE_MB=500
 
 # ──────────────────────────────────────────────
 # Verification

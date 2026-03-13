@@ -151,11 +151,13 @@ load_config() {
     RETENTION_KEEP_DAILY="${RETENTION_KEEP_DAILY:-7}"
     RETENTION_KEEP_WEEKLY="${RETENTION_KEEP_WEEKLY:-4}"
     RETENTION_KEEP_MONTHLY="${RETENTION_KEEP_MONTHLY:-6}"
+    RETENTION_KEEP_YEARLY="${RETENTION_KEEP_YEARLY:-2}"
     DOCKER_ENABLED="${DOCKER_ENABLED:-yes}"
     DOCKER_DB_AUTO_DISCOVERY="${DOCKER_DB_AUTO_DISCOVERY:-yes}"
     MYSQL_DUMP_ENABLED="${MYSQL_DUMP_ENABLED:-yes}"
     POSTGRES_DUMP_ENABLED="${POSTGRES_DUMP_ENABLED:-yes}"
     REDIS_SNAPSHOT_ENABLED="${REDIS_SNAPSHOT_ENABLED:-no}"
+    HOST_DB_ENABLED="${HOST_DB_ENABLED:-no}"
     EMAIL_ENABLED="${EMAIL_ENABLED:-no}"
     EMAIL_ON_SUCCESS="${EMAIL_ON_SUCCESS:-no}"
     VERBOSE="${VERBOSE:-no}"
@@ -174,29 +176,69 @@ read_secret_file() {
     if [[ ! -f "$file" ]]; then
         die "Secret file not found: $file"
     fi
+    # Warn if file is readable by others
+    local perms
+    perms=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)
+    if [[ -n "$perms" ]] && [[ "${perms: -1}" != "0" ]]; then
+        log_warn "Secret file $file is readable by others (mode $perms) — run: chmod 600 $file"
+    fi
     head -n 1 "$file"
+}
+
+# ──────────────────────────────────────────────
+# Disk space checks
+# ──────────────────────────────────────────────
+check_disk_space() {
+    local path="$1"
+    local min_mb="${2:-500}"  # minimum free space in MB
+
+    local avail_kb
+    avail_kb=$(df -k "$path" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -z "$avail_kb" ]]; then
+        log_warn "Could not check disk space for $path"
+        return 0
+    fi
+
+    local avail_mb=$((avail_kb / 1024))
+    if [[ $avail_mb -lt $min_mb ]]; then
+        log_error "Low disk space on $path: ${avail_mb}MB available (minimum: ${min_mb}MB)"
+        return 1
+    fi
+
+    log_debug "Disk space on $path: ${avail_mb}MB available"
+    return 0
+}
+
+# ──────────────────────────────────────────────
+# Sanitize strings for use in filenames
+# ──────────────────────────────────────────────
+sanitize_filename() {
+    local name="$1"
+    # Replace anything that's not alphanumeric, dash, underscore or dot
+    echo "$name" | sed 's/[^a-zA-Z0-9._-]/_/g' | head -c 200
 }
 
 # ──────────────────────────────────────────────
 # Lockfile
 # ──────────────────────────────────────────────
-LOCKFILE="/var/run/computile-backup.lock"
+LOCKDIR="/var/run/computile-backup.lock"
 
 acquire_lock() {
-    if [[ -f "$LOCKFILE" ]]; then
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
         local pid
-        pid=$(cat "$LOCKFILE" 2>/dev/null || true)
+        pid=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             die "Another backup is already running (PID $pid)"
         fi
         log_warn "Stale lockfile found, removing"
-        rm -f "$LOCKFILE"
+        rm -rf "$LOCKDIR"
+        mkdir "$LOCKDIR" || die "Could not acquire lock"
     fi
-    echo $$ > "$LOCKFILE"
+    echo $$ > "$LOCKDIR/pid"
 }
 
 release_lock() {
-    rm -f "$LOCKFILE"
+    rm -rf "$LOCKDIR"
 }
 
 # ──────────────────────────────────────────────
@@ -217,6 +259,10 @@ check_prerequisites() {
         missing+=("msmtp")
     fi
 
+    if [[ -n "${HEALTHCHECK_URL:-}" ]] && ! command -v curl &>/dev/null; then
+        missing+=("curl")
+    fi
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "Missing required commands: ${missing[*]}"
     fi
@@ -224,5 +270,12 @@ check_prerequisites() {
     # Check restic password file
     if [[ ! -f "${RESTIC_PASSWORD_FILE:-}" ]]; then
         die "Restic password file not found: ${RESTIC_PASSWORD_FILE:-<not set>}"
+    fi
+
+    # Warn about insecure secret file permissions
+    local perms
+    perms=$(stat -c '%a' "$RESTIC_PASSWORD_FILE" 2>/dev/null || stat -f '%Lp' "$RESTIC_PASSWORD_FILE" 2>/dev/null || true)
+    if [[ -n "$perms" ]] && [[ "${perms: -1}" != "0" ]]; then
+        log_warn "Restic password file is readable by others (mode $perms) — run: chmod 600 $RESTIC_PASSWORD_FILE"
     fi
 }

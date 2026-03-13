@@ -37,7 +37,7 @@ Les fichiers bruts d'une base de données en cours d'exécution (volumes Docker)
 Le backup agent effectue des **dumps logiques** via `docker exec` :
 
 - **MySQL/MariaDB** : `mysqldump --single-transaction` (cohérent, sans verrouillage)
-- **PostgreSQL** : `pg_dump -Fc` (format custom, compressé)
+- **PostgreSQL** : `pg_dump` plain text + gzip (format SQL compressé)
 - **Redis** : `BGSAVE` + copie du `dump.rdb` (optionnel)
 
 Les dumps sont stockés localement puis inclus dans le snapshot restic.

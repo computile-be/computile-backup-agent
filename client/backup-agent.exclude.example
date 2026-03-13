@@ -30,11 +30,13 @@
 **/.venv
 **/__pycache__
 
-# Build artifacts
-**/.next
-**/dist
-**/build
-**/.cache
+# Build artifacts (scoped to common app directories to avoid excluding
+# Coolify internal data under /data/coolify)
+/var/www/**/.next
+/var/www/**/dist
+/var/www/**/build
+/home/**/.cache
+/var/www/**/.cache
 
 # OS files
 .Trash*

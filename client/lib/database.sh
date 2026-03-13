@@ -14,6 +14,12 @@ setup_dump_dirs() {
     DB_DUMP_DIR="${BACKUP_ROOT}/db"
     mkdir -p "${DB_DUMP_DIR}/mysql" "${DB_DUMP_DIR}/postgres" "${DB_DUMP_DIR}/redis"
     log_info "Database dump directory: $DB_DUMP_DIR"
+
+    # Check available disk space (minimum 500MB for dumps)
+    if ! check_disk_space "$DB_DUMP_DIR" "${DUMP_MIN_SPACE_MB:-500}"; then
+        log_error "Insufficient disk space for database dumps"
+        return 1
+    fi
 }
 
 get_dump_dir() {
@@ -63,10 +69,10 @@ dump_mysql() {
         db_password=$(get_mysql_password "$container_id") || true
     fi
 
-    # Build auth args
-    local auth_args=("-u" "$db_user")
+    # Build auth args (use MYSQL_PWD env var to avoid password in process list)
+    local docker_env_args=()
     if [[ -n "$db_password" ]]; then
-        auth_args+=("-p${db_password}")
+        docker_env_args+=("-e" "MYSQL_PWD=${db_password}")
     fi
 
     # Determine databases to dump
@@ -76,8 +82,8 @@ dump_mysql() {
     else
         # List all databases, excluding system ones
         local db_list
-        db_list=$(docker exec "$container_id" \
-            $mysql_bin "${auth_args[@]}" -N -e "SHOW DATABASES;" 2>/dev/null \
+        db_list=$(docker exec "${docker_env_args[@]}" "$container_id" \
+            $mysql_bin -u "$db_user" -N -e "SHOW DATABASES;" 2>/dev/null \
             | grep -Ev '^(information_schema|performance_schema|mysql|sys)$') || {
             log_error "Failed to list databases in container $container_name"
             return 1
@@ -97,7 +103,9 @@ dump_mysql() {
     local errors=0
 
     for db in "${databases[@]}"; do
-        local dump_file="${DB_DUMP_DIR}/mysql/${container_name}_${db}_${ts}.sql.gz"
+        local safe_name
+        safe_name=$(sanitize_filename "${container_name}_${db}")
+        local dump_file="${DB_DUMP_DIR}/mysql/${safe_name}_${ts}.sql.gz"
         log_info "  Dumping database: $db → $(basename "$dump_file")"
 
         if [[ "${DRY_RUN:-no}" == "yes" ]]; then
@@ -105,14 +113,22 @@ dump_mysql() {
             continue
         fi
 
-        if docker exec "$container_id" \
-            $mysqldump_bin "${auth_args[@]}" \
+        if docker exec "${docker_env_args[@]}" "$container_id" \
+            $mysqldump_bin -u "$db_user" \
             --single-transaction \
             --routines \
             --triggers \
             --events \
             "$db" 2>/dev/null \
             | gzip > "$dump_file"; then
+
+            # Verify dump is not empty (gzip creates the file even if mysqldump fails)
+            if [[ ! -s "$dump_file" ]]; then
+                log_error "  Dump file is empty: $db from $container_name"
+                rm -f "$dump_file"
+                ((errors++))
+                continue
+            fi
 
             local size
             size=$(du -h "$dump_file" | cut -f1)
@@ -174,7 +190,9 @@ dump_postgres() {
     local errors=0
 
     for db in "${databases[@]}"; do
-        local dump_file="${DB_DUMP_DIR}/postgres/${container_name}_${db}_${ts}.sql.gz"
+        local safe_name
+        safe_name=$(sanitize_filename "${container_name}_${db}")
+        local dump_file="${DB_DUMP_DIR}/postgres/${safe_name}_${ts}.sql.gz"
         log_info "  Dumping database: $db → $(basename "$dump_file")"
 
         if [[ "${DRY_RUN:-no}" == "yes" ]]; then
@@ -183,8 +201,16 @@ dump_postgres() {
         fi
 
         if docker exec "$container_id" \
-            pg_dump -U "$db_user" -Fc "$db" 2>/dev/null \
+            pg_dump -U "$db_user" "$db" 2>/dev/null \
             | gzip > "$dump_file"; then
+
+            # Verify dump is not empty (gzip creates the file even if pg_dump fails)
+            if [[ ! -s "$dump_file" ]]; then
+                log_error "  Dump file is empty: $db from $container_name"
+                rm -f "$dump_file"
+                ((errors++))
+                continue
+            fi
 
             local size
             size=$(du -h "$dump_file" | cut -f1)
@@ -252,7 +278,9 @@ dump_redis() {
 
     local ts
     ts=$(_dump_timestamp)
-    local dump_file="${DB_DUMP_DIR}/redis/${container_name}_${ts}.rdb"
+    local safe_name
+    safe_name=$(sanitize_filename "$container_name")
+    local dump_file="${DB_DUMP_DIR}/redis/${safe_name}_${ts}.rdb"
 
     if docker cp "${container_id}:${rdb_file}" "$dump_file" 2>/dev/null; then
         local size
@@ -267,6 +295,185 @@ dump_redis() {
 }
 
 # ──────────────────────────────────────────────
+# Host-level MySQL / MariaDB dumps (non-Docker)
+# ──────────────────────────────────────────────
+dump_mysql_host() {
+    local db_user="${1:-root}"
+    local db_password="${2:-}"
+    local db_names="${3:-}"  # comma-separated, empty = all
+
+    if [[ "${MYSQL_DUMP_ENABLED:-yes}" != "yes" ]]; then
+        log_debug "MySQL dumps disabled, skipping host databases"
+        return 0
+    fi
+
+    # Detect client binaries
+    local mysql_bin="mysql"
+    local mysqldump_bin="mysqldump"
+    if command -v mariadb &>/dev/null; then
+        mysql_bin="mariadb"
+    fi
+    if command -v mariadb-dump &>/dev/null; then
+        mysqldump_bin="mariadb-dump"
+    fi
+
+    if ! command -v "$mysqldump_bin" &>/dev/null; then
+        log_debug "No mysqldump/mariadb-dump binary found on host, skipping"
+        return 0
+    fi
+
+    log_info "Dumping MySQL/MariaDB from host"
+
+    # Set password via env var to avoid process list exposure
+    local env_prefix=()
+    if [[ -n "$db_password" ]]; then
+        env_prefix=("env" "MYSQL_PWD=${db_password}")
+    fi
+
+    # Determine databases to dump
+    local databases=()
+    if [[ -n "$db_names" ]]; then
+        IFS=',' read -ra databases <<< "$db_names"
+    else
+        local db_list
+        db_list=$("${env_prefix[@]}" "$mysql_bin" -u "$db_user" -N -e "SHOW DATABASES;" 2>/dev/null \
+            | grep -Ev '^(information_schema|performance_schema|mysql|sys)$') || {
+            log_error "Failed to list host MySQL databases"
+            return 1
+        }
+        while IFS= read -r db; do
+            [[ -n "$db" ]] && databases+=("$db")
+        done <<< "$db_list"
+    fi
+
+    if [[ ${#databases[@]} -eq 0 ]]; then
+        log_warn "No host MySQL databases found to dump"
+        return 0
+    fi
+
+    local ts
+    ts=$(_dump_timestamp)
+    local errors=0
+
+    for db in "${databases[@]}"; do
+        local safe_db
+        safe_db=$(sanitize_filename "$db")
+        local dump_file="${DB_DUMP_DIR}/mysql/host_${safe_db}_${ts}.sql.gz"
+        log_info "  Dumping database: $db → $(basename "$dump_file")"
+
+        if [[ "${DRY_RUN:-no}" == "yes" ]]; then
+            log_info "  [DRY RUN] Would dump host database $db"
+            continue
+        fi
+
+        if "${env_prefix[@]}" "$mysqldump_bin" -u "$db_user" \
+            --single-transaction \
+            --routines \
+            --triggers \
+            --events \
+            "$db" 2>/dev/null \
+            | gzip > "$dump_file"; then
+
+            if [[ ! -s "$dump_file" ]]; then
+                log_error "  Dump file is empty: $db (host)"
+                rm -f "$dump_file"
+                ((errors++))
+                continue
+            fi
+
+            local size
+            size=$(du -h "$dump_file" | cut -f1)
+            log_info "  Dump complete: $db ($size)"
+        else
+            log_error "  Failed to dump host database: $db"
+            rm -f "$dump_file"
+            ((errors++))
+        fi
+    done
+
+    return $errors
+}
+
+# ──────────────────────────────────────────────
+# Host-level PostgreSQL dumps (non-Docker)
+# ──────────────────────────────────────────────
+dump_postgres_host() {
+    local db_user="${1:-postgres}"
+    local db_names="${2:-}"  # comma-separated, empty = all
+
+    if [[ "${POSTGRES_DUMP_ENABLED:-yes}" != "yes" ]]; then
+        log_debug "PostgreSQL dumps disabled, skipping host databases"
+        return 0
+    fi
+
+    if ! command -v pg_dump &>/dev/null; then
+        log_debug "No pg_dump binary found on host, skipping"
+        return 0
+    fi
+
+    log_info "Dumping PostgreSQL from host"
+
+    # Determine databases to dump
+    local databases=()
+    if [[ -n "$db_names" ]]; then
+        IFS=',' read -ra databases <<< "$db_names"
+    else
+        local db_list
+        db_list=$(sudo -u "$db_user" psql -t -A \
+            -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';" \
+            2>/dev/null | grep -v '^$') || {
+            log_error "Failed to list host PostgreSQL databases"
+            return 1
+        }
+        while IFS= read -r db; do
+            [[ -n "$db" ]] && databases+=("$db")
+        done <<< "$db_list"
+    fi
+
+    if [[ ${#databases[@]} -eq 0 ]]; then
+        log_warn "No host PostgreSQL databases found to dump"
+        return 0
+    fi
+
+    local ts
+    ts=$(_dump_timestamp)
+    local errors=0
+
+    for db in "${databases[@]}"; do
+        local safe_db
+        safe_db=$(sanitize_filename "$db")
+        local dump_file="${DB_DUMP_DIR}/postgres/host_${safe_db}_${ts}.sql.gz"
+        log_info "  Dumping database: $db → $(basename "$dump_file")"
+
+        if [[ "${DRY_RUN:-no}" == "yes" ]]; then
+            log_info "  [DRY RUN] Would dump host database $db"
+            continue
+        fi
+
+        if sudo -u "$db_user" pg_dump "$db" 2>/dev/null \
+            | gzip > "$dump_file"; then
+
+            if [[ ! -s "$dump_file" ]]; then
+                log_error "  Dump file is empty: $db (host)"
+                rm -f "$dump_file"
+                ((errors++))
+                continue
+            fi
+
+            local size
+            size=$(du -h "$dump_file" | cut -f1)
+            log_info "  Dump complete: $db ($size)"
+        else
+            log_error "  Failed to dump host database: $db"
+            rm -f "$dump_file"
+            ((errors++))
+        fi
+    done
+
+    return $errors
+}
+
+# ──────────────────────────────────────────────
 # Main dump orchestrator
 # ──────────────────────────────────────────────
 run_all_dumps() {
@@ -274,7 +481,7 @@ run_all_dumps() {
 
     local total_errors=0
 
-    # Auto-discovery mode
+    # Auto-discovery mode (Docker containers)
     if [[ "${DOCKER_DB_AUTO_DISCOVERY:-yes}" == "yes" ]] && [[ "${DOCKER_ENABLED:-yes}" == "yes" ]]; then
         log_section "Auto-discovering database containers"
 
@@ -308,8 +515,8 @@ run_all_dumps() {
         log_section "Processing manually configured databases"
 
         for entry in "${MANUAL_DBS[@]}"; do
-            local container_name db_type db_user db_password db_databases
-            eval "$(parse_manual_db_entry "$entry")"
+            local CONTAINER DB_TYPE DB_USER DB_PASSWORD DB_DATABASES
+            IFS='|' read -r CONTAINER DB_TYPE DB_USER DB_PASSWORD DB_DATABASES <<< "$entry"
 
             local cid
             cid=$(resolve_container "$CONTAINER")
@@ -341,6 +548,26 @@ run_all_dumps() {
                     ;;
             esac
         done
+    fi
+
+    # Host-level database dumps (Forge, bare metal, etc.)
+    if [[ "${HOST_DB_ENABLED:-no}" == "yes" ]]; then
+        log_section "Dumping host-level databases"
+
+        if [[ "${MYSQL_DUMP_ENABLED:-yes}" == "yes" ]]; then
+            local host_mysql_user="${HOST_MYSQL_USER:-root}"
+            local host_mysql_password=""
+            if [[ -n "${HOST_MYSQL_PASS_FILE:-}" ]] && [[ -f "$HOST_MYSQL_PASS_FILE" ]]; then
+                host_mysql_password=$(read_secret_file "$HOST_MYSQL_PASS_FILE")
+            fi
+            dump_mysql_host "$host_mysql_user" "$host_mysql_password" "${HOST_MYSQL_DATABASES:-}" \
+                || ((total_errors++)) || true
+        fi
+
+        if [[ "${POSTGRES_DUMP_ENABLED:-yes}" == "yes" ]]; then
+            dump_postgres_host "${HOST_POSTGRES_USER:-postgres}" "${HOST_POSTGRES_DATABASES:-}" \
+                || ((total_errors++)) || true
+        fi
     fi
 
     # Report

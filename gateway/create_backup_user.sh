@@ -143,7 +143,6 @@ if [[ -n "$PUBKEY_FILE" ]]; then
     fi
 
     # Avoid duplicates
-    local key_content
     key_content=$(cat "$PUBKEY_FILE")
     if grep -qF "$key_content" "$AUTH_KEYS" 2>/dev/null; then
         info "SSH key already authorized"

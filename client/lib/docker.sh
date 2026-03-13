@@ -180,20 +180,6 @@ get_postgres_databases() {
 # Manual container configuration
 # ──────────────────────────────────────────────
 
-# Parse manual DB entries from config
-# Format: MANUAL_DBS array with entries like:
-#   "container_name|db_type|user|password|databases"
-parse_manual_db_entry() {
-    local entry="$1"
-    local IFS='|'
-    read -r container_name db_type db_user db_password db_databases <<< "$entry"
-    echo "CONTAINER=$container_name"
-    echo "DB_TYPE=$db_type"
-    echo "DB_USER=$db_user"
-    echo "DB_PASSWORD=$db_password"
-    echo "DB_DATABASES=$db_databases"
-}
-
 # Resolve a container name/pattern to a running container ID
 resolve_container() {
     local name_or_id="$1"

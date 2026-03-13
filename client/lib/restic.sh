@@ -14,6 +14,7 @@ _setup_restic_env() {
 
     # Optional: cache directory
     if [[ -n "${RESTIC_CACHE_DIR:-}" ]]; then
+        mkdir -p "$RESTIC_CACHE_DIR" 2>/dev/null || true
         export RESTIC_CACHE_DIR
     fi
 }
@@ -97,6 +98,13 @@ restic_backup() {
     # Common exclusions
     exclude_opts+=("--exclude-caches")
 
+    # Bandwidth limit
+    local bw_opts=()
+    if [[ -n "${RESTIC_UPLOAD_LIMIT_KB:-}" ]] && [[ "$RESTIC_UPLOAD_LIMIT_KB" -gt 0 ]] 2>/dev/null; then
+        bw_opts+=("--limit-upload" "$RESTIC_UPLOAD_LIMIT_KB")
+        log_info "  Upload limit: ${RESTIC_UPLOAD_LIMIT_KB} KB/s"
+    fi
+
     log_info "Starting restic backup"
     log_info "  Paths: ${backup_paths[*]}"
     log_info "  Tags: client:${CLIENT_ID} host:${HOST_ID} env:${ENVIRONMENT:-prod} role:${ROLE:-server}"
@@ -106,25 +114,48 @@ restic_backup() {
         return 0
     fi
 
+    # Retry logic for transient SFTP failures
+    local max_retries="${RESTIC_RETRY_COUNT:-2}"
+    local attempt=0
     local rc=0
 
-    # Stream output in real-time (progress bar visible) and capture for logging
-    if [[ -n "${LOG_FILE:-}" ]]; then
-        restic backup \
-            "${tags[@]}" \
-            "${exclude_opts[@]}" \
-            --verbose \
-            "${backup_paths[@]}" 2>&1 | tee -a "$LOG_FILE" || rc=${PIPESTATUS[0]}
-    else
-        restic backup \
-            "${tags[@]}" \
-            "${exclude_opts[@]}" \
-            --verbose \
-            "${backup_paths[@]}" || rc=$?
-    fi
+    while [[ $attempt -le $max_retries ]]; do
+        if [[ $attempt -gt 0 ]]; then
+            local wait_secs=$(( attempt * 30 ))
+            log_warn "Retrying restic backup in ${wait_secs}s (attempt $((attempt + 1))/$((max_retries + 1)))..."
+            sleep "$wait_secs"
+        fi
+
+        rc=0
+
+        # Stream output in real-time (progress bar visible) and capture for logging
+        if [[ -n "${LOG_FILE:-}" ]]; then
+            restic backup \
+                --host "${HOST_ID}" \
+                "${tags[@]}" \
+                "${exclude_opts[@]}" \
+                "${bw_opts[@]}" \
+                --verbose \
+                "${backup_paths[@]}" 2>&1 | tee -a "$LOG_FILE" || rc=${PIPESTATUS[0]}
+        else
+            restic backup \
+                --host "${HOST_ID}" \
+                "${tags[@]}" \
+                "${exclude_opts[@]}" \
+                "${bw_opts[@]}" \
+                --verbose \
+                "${backup_paths[@]}" || rc=$?
+        fi
+
+        if [[ $rc -eq 0 ]]; then
+            break
+        fi
+
+        ((attempt++))
+    done
 
     if [[ $rc -ne 0 ]]; then
-        log_error "Restic backup failed (exit code $rc)"
+        log_error "Restic backup failed after $((max_retries + 1)) attempts (exit code $rc)"
         return $rc
     fi
 
@@ -141,21 +172,23 @@ restic_forget_prune() {
     local keep_daily="${RETENTION_KEEP_DAILY:-7}"
     local keep_weekly="${RETENTION_KEEP_WEEKLY:-4}"
     local keep_monthly="${RETENTION_KEEP_MONTHLY:-6}"
+    local keep_yearly="${RETENTION_KEEP_YEARLY:-2}"
 
-    log_info "Applying retention policy: ${keep_daily}d / ${keep_weekly}w / ${keep_monthly}m"
+    log_info "Applying retention policy: ${keep_daily}d / ${keep_weekly}w / ${keep_monthly}m / ${keep_yearly}y"
 
     if [[ "${DRY_RUN:-no}" == "yes" ]]; then
-        log_info "[DRY RUN] Would run: restic forget --prune --keep-daily=$keep_daily --keep-weekly=$keep_weekly --keep-monthly=$keep_monthly"
+        log_info "[DRY RUN] Would run: restic forget --prune --keep-daily=$keep_daily --keep-weekly=$keep_weekly --keep-monthly=$keep_monthly --keep-yearly=$keep_yearly"
         return 0
     fi
 
     local output
     local rc=0
     output=$(restic forget --prune \
+        --host "${HOST_ID}" \
         --keep-daily="$keep_daily" \
         --keep-weekly="$keep_weekly" \
         --keep-monthly="$keep_monthly" \
-        --tag "host:${HOST_ID}" \
+        --keep-yearly="$keep_yearly" \
         --group-by "host,tags" \
         2>&1) || rc=$?
 
@@ -232,4 +265,53 @@ restic_verify() {
 restic_latest_snapshot_info() {
     _setup_restic_env
     restic snapshots --last --compact 2>/dev/null || echo "Unable to retrieve snapshot info"
+}
+
+# Report stats from the latest snapshot
+restic_report_stats() {
+    _setup_restic_env
+
+    local stats_output
+    stats_output=$(restic stats --json --mode restore-size latest 2>/dev/null) || return 0
+
+    if command -v jq &>/dev/null && [[ -n "$stats_output" ]]; then
+        local total_size
+        total_size=$(echo "$stats_output" | jq -r '.total_size // 0')
+        local total_count
+        total_count=$(echo "$stats_output" | jq -r '.total_file_count // 0')
+
+        # Human-readable size
+        local human_size
+        if [[ $total_size -gt $((1024*1024*1024)) ]]; then
+            human_size="$(( total_size / 1024 / 1024 / 1024 )) GB"
+        elif [[ $total_size -gt $((1024*1024)) ]]; then
+            human_size="$(( total_size / 1024 / 1024 )) MB"
+        else
+            human_size="$(( total_size / 1024 )) KB"
+        fi
+
+        log_info "Snapshot stats: ${total_count} files, ${human_size} (restore size)"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
+# ──────────────────────────────────────────────
+healthcheck_ping() {
+    local status="${1:-success}"  # success or fail
+
+    if [[ -z "${HEALTHCHECK_URL:-}" ]]; then
+        return 0
+    fi
+
+    local url="$HEALTHCHECK_URL"
+    if [[ "$status" == "fail" ]]; then
+        url="${url}/fail"
+    fi
+
+    log_debug "Pinging healthcheck: $url"
+
+    # Best-effort: don't fail the backup if the ping fails
+    curl -fsS --max-time 10 --retry 3 "$url" >/dev/null 2>&1 || \
+        log_warn "Healthcheck ping failed (non-critical)"
 }

@@ -43,6 +43,7 @@ Le fichier est un script Bash sourcé par l'agent. Toutes les variables sont des
 | `RETENTION_KEEP_DAILY` | `7` | Snapshots quotidiens conservés |
 | `RETENTION_KEEP_WEEKLY` | `4` | Snapshots hebdomadaires conservés |
 | `RETENTION_KEEP_MONTHLY` | `6` | Snapshots mensuels conservés |
+| `RETENTION_KEEP_YEARLY` | `2` | Snapshots annuels conservés |
 
 ### Docker & bases de données
 
@@ -55,7 +56,20 @@ Le fichier est un script Bash sourcé par l'agent. Toutes les variables sont des
 | `REDIS_SNAPSHOT_ENABLED` | `"no"` | Snapshots Redis (BGSAVE) |
 | `DUMP_CLEANUP_DAYS` | `3` | Jours avant suppression des vieux dumps |
 
-### Bases de données manuelles
+### Bases de données host (Forge, bare metal)
+
+Pour les serveurs où MySQL/PostgreSQL est installé directement sur le host (Laravel Forge, Ploi, etc.) :
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `HOST_DB_ENABLED` | `"no"` | Active les dumps de bases host |
+| `HOST_MYSQL_USER` | `"root"` | Utilisateur MySQL host |
+| `HOST_MYSQL_PASS_FILE` | — | Fichier contenant le mot de passe MySQL |
+| `HOST_MYSQL_DATABASES` | — | Bases à dumper (vide = toutes sauf système) |
+| `HOST_POSTGRES_USER` | `"postgres"` | Utilisateur PostgreSQL host |
+| `HOST_POSTGRES_DATABASES` | — | Bases à dumper (vide = toutes sauf templates) |
+
+### Bases de données manuelles (Docker)
 
 | Paramètre | Description |
 |-----------|-------------|
@@ -81,6 +95,22 @@ Format d'une entrée : `"container_name|db_type|user|password|databases"`
 | `SMTP_PORT` | `"587"` | Port SMTP |
 | `SMTP_USER` | — | Utilisateur SMTP |
 | `SMTP_PASS_FILE` | — | Fichier contenant le mot de passe SMTP |
+
+### Healthcheck
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `HEALTHCHECK_URL` | — | URL à pinger après chaque backup (healthchecks.io, Uptime Kuma, etc.) |
+
+Compatible avec tout service acceptant un ping HTTP GET : [healthchecks.io](https://healthchecks.io), [Uptime Kuma](https://github.com/louislam/uptime-kuma), etc. Ping `/fail` en cas d'échec.
+
+### Performance & réseau
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `RESTIC_UPLOAD_LIMIT_KB` | — | Limite d'upload en KB/s (vide = illimité) |
+| `RESTIC_RETRY_COUNT` | `2` | Nombre de tentatives en cas d'échec SFTP |
+| `DUMP_MIN_SPACE_MB` | `500` | Espace disque minimum (MB) avant les dumps DB |
 
 ### Vérification
 
@@ -157,6 +187,12 @@ INCLUDE_PATHS=(
 )
 
 DOCKER_ENABLED="no"  # Pas de Docker sur ce serveur Forge
+
+# Bases de données installées par Forge directement sur le host
+HOST_DB_ENABLED="yes"
+HOST_MYSQL_USER="root"
+HOST_MYSQL_PASS_FILE="/etc/computile-backup/mysql-password"
+# HOST_MYSQL_DATABASES=""  # vide = toutes les bases non-système
 
 EMAIL_ENABLED="yes"
 EMAIL_TO="alerts@computile.be"

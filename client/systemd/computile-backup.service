@@ -9,15 +9,19 @@ Type=oneshot
 ExecStart=/usr/local/bin/computile-backup
 Nice=10
 IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
 
 # Security hardening
 # Note: ProtectSystem=strict is not used because the agent needs access to
 # /var/run/docker.sock, /root/.ssh (for SFTP), and arbitrary INCLUDE_PATHS.
 PrivateTmp=true
 NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 
-# Timeouts
-TimeoutStartSec=3600
+# Timeouts — allow up to 6 hours for large backups
+TimeoutStartSec=21600
 
 # Logging
 StandardOutput=journal

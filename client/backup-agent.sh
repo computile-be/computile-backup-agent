@@ -117,11 +117,15 @@ main() {
 
     # Acquire lock
     acquire_lock
-    trap 'cleanup; release_lock' EXIT
+    trap 'release_lock' EXIT INT TERM
 
     # Check prerequisites
     log_section "Checking prerequisites"
     check_prerequisites
+
+    # Check disk space on backup root
+    check_disk_space "$BACKUP_ROOT" "${DUMP_MIN_SPACE_MB:-500}" || \
+        log_warn "Low disk space — backup may fail if dumps are large"
 
     # Setup email if needed
     setup_msmtp_if_needed
@@ -134,7 +138,7 @@ main() {
 
     # Phase 1: Database dumps
     local db_errors=0
-    if [[ "${DOCKER_ENABLED:-yes}" == "yes" ]]; then
+    if [[ "${DOCKER_ENABLED:-yes}" == "yes" ]] || [[ "${HOST_DB_ENABLED:-no}" == "yes" ]]; then
         log_section "Phase 1: Database dumps"
         run_all_dumps || db_errors=$?
 
@@ -143,13 +147,14 @@ main() {
             # Continue with backup — partial dumps are better than no backup
         fi
     else
-        log_info "Docker disabled, skipping database dumps"
+        log_info "No database sources configured, skipping dumps"
     fi
 
     # Phase 2: Restic backup
     log_section "Phase 2: Restic backup"
     if ! restic_backup; then
         notify_failure "restic backup" "Restic backup command failed"
+        healthcheck_ping "fail"
         die "Restic backup failed"
     fi
 
@@ -175,27 +180,23 @@ main() {
     elapsed=$(get_elapsed)
     log_info "Duration: $elapsed"
 
+    # Snapshot stats
+    restic_report_stats 2>/dev/null || true
+
     if has_errors; then
         log_warn "Completed with errors:"
         get_error_summary | while IFS= read -r err; do
             log_warn "  - $err"
         done
         notify_failure "partial" "Backup completed with some errors. See log for details."
+        healthcheck_ping "fail"
     else
         log_info "All operations completed successfully"
         local snapshot_info
         snapshot_info=$(restic_latest_snapshot_info 2>/dev/null || echo "N/A")
         notify_success "$snapshot_info"
+        healthcheck_ping "success"
     fi
-}
-
-# ──────────────────────────────────────────────
-# Cleanup handler
-# ──────────────────────────────────────────────
-cleanup() {
-    # Don't clean temp dirs — DB dumps need to persist until next run
-    # cleanup_temp_dirs is available if needed
-    true
 }
 
 # ──────────────────────────────────────────────

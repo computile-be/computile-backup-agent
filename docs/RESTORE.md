@@ -151,29 +151,23 @@ restic restore latest --target /tmp/restore --include /var/backups/computile/db/
 
 ### Restaurer dans un container Docker
 
-Les dumps PostgreSQL sont au format `pg_dump -Fc` (custom format), compressés en `.gz` :
+Les dumps PostgreSQL sont au format SQL plain text, compressés en `.sql.gz` :
 
 ```bash
-# Décompresser le wrapper gzip
-gunzip /tmp/restore/.../container_dbname_2026-03-13T02-15-00.sql.gz
+# Directement via pipe (sans copie intermédiaire)
+gunzip -c /tmp/restore/.../container_dbname_2026-03-13T02-15-00.sql.gz \
+    | docker exec -i <container_id> psql -U postgres -d dbname
 
-# Le fichier résultant est un dump au format custom pg_dump
-# Copier dans le container
-docker cp /tmp/restore/.../container_dbname_2026-03-13T02-15-00.sql <container_id>:/tmp/dump.fc
-
-# Restaurer (crée la base si nécessaire)
-docker exec <container_id> pg_restore -U postgres -d dbname --clean --if-exists /tmp/dump.fc
-
-# Ou créer une nouvelle base
+# Ou créer une nouvelle base avant restauration
 docker exec <container_id> createdb -U postgres dbname_restored
-docker exec <container_id> pg_restore -U postgres -d dbname_restored /tmp/dump.fc
+gunzip -c /tmp/restore/.../container_dbname_2026-03-13T02-15-00.sql.gz \
+    | docker exec -i <container_id> psql -U postgres -d dbname_restored
 ```
 
 ### Restaurer dans un PostgreSQL local
 
 ```bash
-gunzip dump_file.sql.gz
-pg_restore -U postgres -d dbname --clean --if-exists dump_file.sql
+gunzip -c dump_file.sql.gz | psql -U postgres -d dbname
 ```
 
 ---
@@ -255,6 +249,111 @@ docker ps
 
 ---
 
+## 8. Restauration d'un VPS Coolify
+
+Coolify stocke sa configuration, ses clés SSH et sa base de données dans `/data/coolify`. Cette procédure suit les recommandations officielles de Coolify.
+
+> **Référence** : https://coolify.io/docs/knowledge-base/how-to/backup-restore-coolify
+
+### Fichiers critiques sauvegardés
+
+| Fichier | Rôle |
+|---------|------|
+| `/data/coolify/source/.env` | Contient l'`APP_KEY` (clé de chiffrement Coolify) |
+| `/data/coolify/ssh/keys/` | Clés SSH ED25519 pour la connexion aux serveurs |
+| Base `coolify` dans `coolify-db` | Configuration Coolify, projets, variables d'environnement |
+
+### 8.1 Installer Coolify sur le nouveau serveur
+
+Installer Coolify **à la même version** que le serveur original :
+
+```bash
+curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
+```
+
+### 8.2 Noter l'APP_KEY du nouveau serveur
+
+```bash
+# Sauvegarder la nouvelle APP_KEY (on en aura besoin)
+grep APP_KEY /data/coolify/source/.env
+```
+
+### 8.3 Restaurer les fichiers depuis restic
+
+```bash
+export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/srv/backups/backup-client/data/vps-01"
+export RESTIC_PASSWORD_FILE="/path/to/restic-password"
+
+# Extraire /data/coolify dans un répertoire temporaire
+restic restore latest --target /tmp/restore --include /data/coolify
+```
+
+### 8.4 Arrêter Coolify
+
+```bash
+docker stop coolify coolify-redis coolify-realtime coolify-proxy
+```
+
+### 8.5 Restaurer la base de données Coolify
+
+```bash
+# Extraire le dump PostgreSQL de coolify-db
+restic restore latest --target /tmp/restore --include /var/backups/computile/db/postgres/
+
+# Trouver le dump coolify-db
+ls /tmp/restore/var/backups/computile/db/postgres/coolify-db_coolify_*
+
+# Restaurer dans le container coolify-db
+gunzip -c /tmp/restore/var/backups/computile/db/postgres/coolify-db_coolify_*.sql.gz \
+    | docker exec -i coolify-db psql -U coolify -d coolify
+```
+
+### 8.6 Restaurer les clés SSH
+
+```bash
+# Supprimer les clés auto-générées
+rm -f /data/coolify/ssh/keys/*
+
+# Restaurer les clés depuis le backup
+cp /tmp/restore/data/coolify/ssh/keys/* /data/coolify/ssh/keys/
+
+# Corriger les permissions
+chown -R root:root /data/coolify/ssh/keys/
+chmod 600 /data/coolify/ssh/keys/*
+```
+
+### 8.7 Configurer APP_PREVIOUS_KEYS
+
+L'`APP_KEY` a changé entre l'ancien et le nouveau serveur. Coolify doit connaître l'ancienne clé pour déchiffrer les secrets stockés en base :
+
+```bash
+# Récupérer l'ancienne APP_KEY depuis le backup
+OLD_KEY=$(grep APP_KEY /tmp/restore/data/coolify/source/.env | cut -d= -f2)
+
+# Ajouter au .env du nouveau serveur
+echo "APP_PREVIOUS_KEYS=${OLD_KEY}" >> /data/coolify/source/.env
+```
+
+> **Si vous avez migré plusieurs fois**, séparer les clés par des virgules sans espaces : `APP_PREVIOUS_KEYS=key1,key2,key3`
+
+### 8.8 Redémarrer Coolify
+
+```bash
+# Relancer via le script officiel (redémarre tous les containers)
+curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
+```
+
+### 8.9 Vérifier
+
+- Se connecter au dashboard Coolify avec les anciens identifiants
+- Vérifier la connectivité SSH aux serveurs dans Settings > Servers
+- Si erreur 500 au login : vérifier `APP_PREVIOUS_KEYS` dans `/data/coolify/source/.env`
+- Si erreur SSH "permission denied" : vérifier que les clés dans `/data/coolify/ssh/keys/` correspondent à celles de l'ancien serveur
+
+> **Note** : cette procédure restaure l'instance Coolify elle-même. Les données des applications (volumes Docker) sont restaurées séparément via les fichiers (`/data/coolify`, `/opt`, `/srv`) et les dumps de bases de données.
+
+---
+
 ## Points d'attention
 
 - **Mot de passe restic** : sans lui, les données sont irrécupérables. Conservez-le en dehors du serveur sauvegardé.
@@ -262,4 +361,3 @@ docker ps
 - **Permissions** : après restauration de fichiers, vérifier les permissions (`chown`, `chmod`).
 - **Containers Docker** : les containers doivent être démarrés avant de restaurer les bases.
 - **Configuration réseau** : les IPs et noms d'hôte peuvent différer sur un nouveau serveur.
-- **Coolify** : si vous restaurez un VPS Coolify, vérifier que `/data/coolify` est complet et que les stacks Docker Compose sont cohérentes.
