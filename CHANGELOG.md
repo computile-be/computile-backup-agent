@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.3] - 2026-03-14
+
+### Fixed
+- Gateway manager crash on startup: `((var++))` with `set -e` exits when variable is `0` (arithmetic evaluates to false) — added `|| true` to all increment operations
+- Fixed remaining `[[ cond ]] && assignment` patterns that silently exit with `set -e` when condition is false
+
 ## [1.6.2] - 2026-03-14
 
 ### Fixed

@@ -186,7 +186,7 @@ show_overview() {
 
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
-        ((total_clients++))
+        ((total_clients++)) || true
 
         local client_dir="${BACKUP_BASE}/${client}"
         local data_dir="${client_dir}/data"
@@ -207,12 +207,12 @@ show_overview() {
 
         if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
             status="EMPTY"
-            ((stale_clients++))
+            ((stale_clients++)) || true
         elif [[ $(( now - last_epoch )) -gt $stale_secs ]]; then
             status="STALE"
-            ((stale_clients++))
+            ((stale_clients++)) || true
         else
-            ((active_clients++))
+            ((active_clients++)) || true
         fi
 
         # Client ID without "backup-" prefix for display
@@ -352,9 +352,9 @@ show_client_detail() {
             local has_password="no"
             local has_config="no"
             local has_key="no"
-            [[ -f "$vps_meta/restic-password" ]] && has_password="yes"
-            [[ -f "$vps_meta/backup-agent.conf" ]] && has_config="yes"
-            [[ -f "$vps_meta/ssh-public-key.pub" ]] && has_key="yes"
+            if [[ -f "$vps_meta/restic-password" ]]; then has_password="yes"; fi
+            if [[ -f "$vps_meta/backup-agent.conf" ]]; then has_config="yes"; fi
+            if [[ -f "$vps_meta/ssh-public-key.pub" ]]; then has_key="yes"; fi
             local meta_age
             meta_age=$(get_last_activity "$vps_meta")
             output+="  ${vps_id}: password=${has_password} config=${has_config} ssh-key=${has_key} (updated: ${meta_age})\n"
@@ -469,7 +469,7 @@ show_stale_alerts() {
 
         if [[ ! -d "$data_dir" ]]; then
             output+="  ALERT  ${display}: data directory missing\n"
-            ((alerts++))
+            ((alerts++)) || true
             continue
         fi
 
@@ -478,7 +478,7 @@ show_stale_alerts() {
 
         if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
             output+="  ALERT  ${display}: no backup data found (never backed up?)\n"
-            ((alerts++))
+            ((alerts++)) || true
             continue
         fi
 
@@ -490,10 +490,10 @@ show_stale_alerts() {
 
         if [[ $age_secs -gt $(( stale_secs * 3 )) ]]; then
             output+="  ALERT  ${display}: last backup ${age_days}d ${age_hours}h ago (${last_time})\n"
-            ((alerts++))
+            ((alerts++)) || true
         elif [[ $age_secs -gt $stale_secs ]]; then
             output+="  WARN   ${display}: last backup ${age_days}d ${age_hours}h ago (${last_time})\n"
-            ((warnings++))
+            ((warnings++)) || true
         else
             output+="  OK     ${display}: last backup ${age_days}d ${age_hours}h ago (${last_time})\n"
         fi
@@ -679,7 +679,7 @@ create_user_interactive() {
         3>&1 1>&2 2>&3) || return
 
     local args=("$client_id")
-    [[ -n "$vps_id" ]] && args+=("--vps" "$vps_id")
+    if [[ -n "$vps_id" ]]; then args+=("--vps" "$vps_id"); fi
 
     clear
     echo "════════════════════════════════════════════════"
@@ -779,7 +779,7 @@ show_user_keys() {
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             [[ "$line" == \#* ]] && continue
-            ((idx++))
+            ((idx++)) || true
             # Show key type and comment (last field), truncate the key itself
             local key_type
             key_type=$(echo "$line" | awk '{print $1}')
@@ -919,15 +919,15 @@ main_menu() {
     while true; do
         # Quick count for menu title
         local client_count=0
-        while IFS= read -r c; do [[ -n "$c" ]] && ((client_count++)); done < <(list_clients)
+        while IFS= read -r c; do [[ -n "$c" ]] && { ((client_count++)) || true; }; done < <(list_clients)
 
         local sftp_count=0
         local sftp_procs
         sftp_procs=$(get_sftp_sessions)
-        [[ -n "$sftp_procs" ]] && sftp_count=$(echo "$sftp_procs" | wc -l)
+        if [[ -n "$sftp_procs" ]]; then sftp_count=$(echo "$sftp_procs" | wc -l); fi
 
         local title="computile-backup Gateway — ${client_count} clients"
-        [[ $sftp_count -gt 0 ]] && title+=" — ${sftp_count} active"
+        if [[ $sftp_count -gt 0 ]]; then title+=" — ${sftp_count} active"; fi
 
         local choice
         choice=$($DIALOG --title "$title" \
