@@ -291,6 +291,8 @@ show_client_detail() {
                 [[ -d "$vps_path" ]] || continue
                 local vps_name
                 vps_name=$(basename "$vps_path")
+                # Skip _meta directory (recovery metadata, shown separately)
+                [[ "$vps_name" == "_meta" ]] && continue
 
                 local vps_size
                 vps_size=$(get_size "$vps_path")
@@ -313,6 +315,30 @@ show_client_detail() {
         fi
     else
         output+="  Data directory not found\n"
+    fi
+
+    # Recovery metadata
+    local meta_dir="${data_dir}/_meta"
+    output+="\n"
+    output+="RECOVERY METADATA\n"
+    if [[ -d "$meta_dir" ]]; then
+        for vps_meta in "$meta_dir"/*/; do
+            [[ -d "$vps_meta" ]] || continue
+            local vps_id
+            vps_id=$(basename "$vps_meta")
+            local has_password="no"
+            local has_config="no"
+            local has_key="no"
+            [[ -f "$vps_meta/restic-password" ]] && has_password="yes"
+            [[ -f "$vps_meta/backup-agent.conf" ]] && has_config="yes"
+            [[ -f "$vps_meta/ssh-public-key.pub" ]] && has_key="yes"
+            local meta_age
+            meta_age=$(get_last_activity "$vps_meta")
+            output+="  ${vps_id}: password=${has_password} config=${has_config} ssh-key=${has_key} (updated: ${meta_age})\n"
+        done
+    else
+        output+="  No recovery metadata synced yet.\n"
+        output+="  (VPS agents v1.5.1+ sync automatically after each backup)\n"
     fi
 
     # Disk usage breakdown

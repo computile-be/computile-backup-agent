@@ -405,6 +405,70 @@ restic_report_stats() {
 }
 
 # ──────────────────────────────────────────────
+# Sync critical config to gateway (_meta directory)
+# ──────────────────────────────────────────────
+# Uploads restic password, agent config, and SSH key to a _meta/
+# directory on the gateway. This ensures disaster recovery is
+# possible even if the VPS is completely lost.
+sync_meta_to_gateway() {
+    # Parse SFTP target from RESTIC_REPOSITORY
+    # Format: sftp:user@host:/path/to/repo
+    local repo="${RESTIC_REPOSITORY:-}"
+    if [[ ! "$repo" =~ ^sftp:([^:]+):(.+)$ ]]; then
+        log_debug "Repository is not SFTP-based, skipping meta sync"
+        return 0
+    fi
+
+    local sftp_target="${BASH_REMATCH[1]}"
+    local repo_path="${BASH_REMATCH[2]}"
+    # _meta lives one level up from the restic repo (alongside VPS dirs)
+    local meta_path
+    meta_path=$(dirname "$repo_path")/_meta/${HOST_ID}
+
+    log_info "Syncing recovery metadata to gateway..."
+
+    if [[ "${DRY_RUN:-no}" == "yes" ]]; then
+        log_info "[DRY RUN] Would sync meta to ${sftp_target}:${meta_path}"
+        return 0
+    fi
+
+    # Build SFTP batch commands
+    local batch_file
+    batch_file=$(mktemp)
+    trap "rm -f '$batch_file'" RETURN
+
+    # Create directory structure
+    echo "-mkdir $(dirname "$repo_path")/_meta" >> "$batch_file"
+    echo "-mkdir ${meta_path}" >> "$batch_file"
+
+    # Upload restic password (critical — without this, backups are unrecoverable)
+    if [[ -f "${RESTIC_PASSWORD_FILE:-}" ]]; then
+        echo "put ${RESTIC_PASSWORD_FILE} ${meta_path}/restic-password" >> "$batch_file"
+    fi
+
+    # Upload agent config (useful for re-deployment)
+    local config_file="${CONFIG_FILE:-/etc/computile-backup/backup-agent.conf}"
+    if [[ -f "$config_file" ]]; then
+        echo "put ${config_file} ${meta_path}/backup-agent.conf" >> "$batch_file"
+    fi
+
+    # Upload SSH public key (useful for re-authorizing a rebuilt VPS)
+    for key_path in /root/.ssh/backup_ed25519.pub /etc/computile-backup/ssh/id_ed25519.pub; do
+        if [[ -f "$key_path" ]]; then
+            echo "put ${key_path} ${meta_path}/ssh-public-key.pub" >> "$batch_file"
+            break
+        fi
+    done
+
+    # Execute SFTP batch (best-effort: don't fail the backup if this fails)
+    if sftp -o ConnectTimeout=10 -o BatchMode=yes -b "$batch_file" "${sftp_target}" &>/dev/null; then
+        log_info "Recovery metadata synced to gateway (_meta/${HOST_ID}/)"
+    else
+        log_warn "Failed to sync metadata to gateway (non-critical)"
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
 # ──────────────────────────────────────────────
 healthcheck_ping() {

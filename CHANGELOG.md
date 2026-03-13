@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.1] - 2026-03-14
+
+### Added
+- **Recovery metadata sync**: after each backup, critical recovery files (restic password, config, SSH public key) are automatically uploaded to `_meta/{HOST_ID}/` on the gateway via SFTP — ensures disaster recovery is possible even if the VPS is lost
+- Gateway TUI manager now displays recovery metadata per client in the detail view
+
 ## [1.5.0] - 2026-03-14
 
 ### Added

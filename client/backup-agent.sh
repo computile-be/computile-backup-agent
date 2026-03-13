@@ -289,6 +289,9 @@ main() {
     # Snapshot stats
     restic_report_stats 2>/dev/null || true
 
+    # Sync recovery metadata to gateway (password, config, SSH key)
+    sync_meta_to_gateway || true
+
     if has_errors; then
         log_warn "Completed with errors:"
         get_error_summary | while IFS= read -r err; do
