@@ -44,6 +44,17 @@ dump_mysql() {
 
     log_info "Dumping MySQL/MariaDB from container: $container_name"
 
+    # Detect client binaries (MariaDB 11+ dropped mysql/mysqldump symlinks)
+    local mysql_bin="mysql"
+    local mysqldump_bin="mysqldump"
+    if docker exec "$container_id" which mariadb &>/dev/null; then
+        mysql_bin="mariadb"
+    fi
+    if docker exec "$container_id" which mariadb-dump &>/dev/null; then
+        mysqldump_bin="mariadb-dump"
+    fi
+    log_debug "Using client binaries: $mysql_bin / $mysqldump_bin"
+
     # Auto-detect credentials if not provided
     if [[ -z "$db_user" ]]; then
         db_user=$(get_mysql_user "$container_id")
@@ -66,7 +77,7 @@ dump_mysql() {
         # List all databases, excluding system ones
         local db_list
         db_list=$(docker exec "$container_id" \
-            mysql "${auth_args[@]}" -N -e "SHOW DATABASES;" 2>/dev/null \
+            $mysql_bin "${auth_args[@]}" -N -e "SHOW DATABASES;" 2>/dev/null \
             | grep -Ev '^(information_schema|performance_schema|mysql|sys)$') || {
             log_error "Failed to list databases in container $container_name"
             return 1
@@ -95,7 +106,7 @@ dump_mysql() {
         fi
 
         if docker exec "$container_id" \
-            mysqldump "${auth_args[@]}" \
+            $mysqldump_bin "${auth_args[@]}" \
             --single-transaction \
             --routines \
             --triggers \
