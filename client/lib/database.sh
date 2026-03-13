@@ -140,7 +140,8 @@ dump_mysql() {
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
 # ──────────────────────────────────────────────
@@ -222,7 +223,8 @@ dump_postgres() {
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
 # ──────────────────────────────────────────────
@@ -391,7 +393,8 @@ dump_mysql_host() {
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
 # ──────────────────────────────────────────────
@@ -470,7 +473,8 @@ dump_postgres_host() {
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
 # ──────────────────────────────────────────────
@@ -573,11 +577,11 @@ run_all_dumps() {
     # Report
     if [[ $total_errors -gt 0 ]]; then
         log_error "Database dumps completed with $total_errors error(s)"
+        return 1
     else
         log_info "Database dumps completed successfully"
+        return 0
     fi
-
-    return $total_errors
 }
 
 # ──────────────────────────────────────────────

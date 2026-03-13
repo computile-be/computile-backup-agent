@@ -8,6 +8,17 @@
 /var/lib/docker/containers/*/log-*
 /var/lib/docker/buildkit
 /var/lib/docker/tmp
+/var/lib/docker/volumes
+
+# Database raw data files (backed up via logical dumps instead)
+# Note: bind-mounted DB directories are auto-excluded at runtime.
+# These patterns catch any that slip through (named volumes mounted
+# to host paths, non-standard locations, etc.)
+# Uncomment or adapt as needed for your setup:
+# /data/coolify/databases
+# /data/coolify/services/*/mysql*
+# /data/coolify/services/*/mariadb*
+# /data/coolify/services/*/postgres*
 
 # System temp / cache
 /tmp

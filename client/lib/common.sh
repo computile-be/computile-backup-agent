@@ -272,10 +272,15 @@ check_prerequisites() {
         die "Restic password file not found: ${RESTIC_PASSWORD_FILE:-<not set>}"
     fi
 
-    # Warn about insecure secret file permissions
+    # Enforce secure permissions on password file
     local perms
     perms=$(stat -c '%a' "$RESTIC_PASSWORD_FILE" 2>/dev/null || stat -f '%Lp' "$RESTIC_PASSWORD_FILE" 2>/dev/null || true)
     if [[ -n "$perms" ]] && [[ "${perms: -1}" != "0" ]]; then
-        log_warn "Restic password file is readable by others (mode $perms) — run: chmod 600 $RESTIC_PASSWORD_FILE"
+        die "Restic password file is readable by others (mode $perms) — fix with: chmod 600 $RESTIC_PASSWORD_FILE"
+    fi
+
+    # Verify password file is not empty
+    if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then
+        die "Restic password file is empty: $RESTIC_PASSWORD_FILE"
     fi
 }

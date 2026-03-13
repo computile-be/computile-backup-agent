@@ -11,6 +11,12 @@ Nice=10
 IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
 
+# Retry on failure: up to 2 retries, 5 min apart, within a 1h window
+Restart=on-failure
+RestartSec=300
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
 # Security hardening
 # Note: ProtectSystem=strict is not used because the agent needs access to
 # /var/run/docker.sock, /root/.ssh (for SFTP), and arbitrary INCLUDE_PATHS.

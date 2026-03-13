@@ -4,6 +4,22 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.0] - 2026-03-13
+
+### Added
+- **`--status` flag**: JSON output for fleet monitoring — agent version, last backup, snapshot count/size, disk space, timer status
+- **SFTP pre-flight check**: verifies repository connectivity before starting database dumps, avoiding wasted time on unreachable gateways
+- **Auto-exclude DB bind mounts**: detects bind-mounted database data directories from running containers and excludes them from restic backup — raw DB files are redundant (backed up via logical dumps) and unsafe to copy without locks
+- **Systemd retry on failure**: service auto-retries up to 2 times (5 min apart) on transient failures
+- **Gateway `remove_backup_user.sh`**: script to cleanly remove a client's backup user, with optional `--delete-data`
+- Empty snapshot detection: warns if no filesystem paths exist and only dump directory would be backed up
+- Example excludes file now includes Docker volumes and database data patterns
+
+### Fixed
+- Database dump error counting: `dump_mysql`/`dump_postgres`/host variants now return 0/1 instead of raw error count — fixes undercount when `((total_errors++))` was used on multi-error returns
+- **Dump cleanup moved before new dumps** (was Phase 5, now Phase 1) — old dumps are no longer re-uploaded in every backup cycle, freeing disk space before new dumps start
+- Restic password file validation: now **refuses to start** if file is world-readable (was only a warning) and checks for empty files
+
 ## [1.3.0] - 2026-03-13
 
 ### Added

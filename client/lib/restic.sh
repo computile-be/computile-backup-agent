@@ -20,6 +20,75 @@ _setup_restic_env() {
 }
 
 # ──────────────────────────────────────────────
+# Auto-exclude DB container bind mounts
+# ──────────────────────────────────────────────
+# DB data directories are backed up via logical dumps (mysqldump, pg_dump).
+# Raw data files (InnoDB tablespaces, WAL segments) are redundant and unsafe
+# to back up with restic (no locking = potentially corrupt on restore).
+# This function detects bind-mounted data dirs from running DB containers
+# and adds --exclude flags for each.
+_exclude_db_bind_mounts() {
+    local -n _opts=$1  # nameref to exclude_opts array
+
+    local discovered
+    discovered=$(discover_db_containers 2>/dev/null) || return 0
+    [[ -z "$discovered" ]] && return 0
+
+    while IFS='|' read -r cid cname db_type image; do
+        [[ -z "$cid" ]] && continue
+
+        # Get bind mounts (Type=bind only, not named volumes)
+        local mounts
+        mounts=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$cid" 2>/dev/null) || continue
+
+        while IFS= read -r mount_src; do
+            [[ -z "$mount_src" ]] && continue
+
+            # Only exclude if path looks like a DB data directory
+            # (contains data, db, mysql, postgres, redis, etc.)
+            local mount_lower
+            mount_lower=$(echo "$mount_src" | tr '[:upper:]' '[:lower:]')
+
+            local should_exclude=false
+            case "$db_type" in
+                mysql)
+                    # MySQL/MariaDB default data dirs and common mount patterns
+                    if [[ "$mount_lower" == */mysql* ]] || \
+                       [[ "$mount_lower" == */mariadb* ]] || \
+                       [[ "$mount_lower" == */data ]] || \
+                       [[ "$mount_lower" == */db-data ]] || \
+                       [[ "$mount_lower" == */database* ]]; then
+                        should_exclude=true
+                    fi
+                    ;;
+                postgres)
+                    if [[ "$mount_lower" == */postgres* ]] || \
+                       [[ "$mount_lower" == */pgdata* ]] || \
+                       [[ "$mount_lower" == */pg_data* ]] || \
+                       [[ "$mount_lower" == */data ]] || \
+                       [[ "$mount_lower" == */db-data ]] || \
+                       [[ "$mount_lower" == */database* ]]; then
+                        should_exclude=true
+                    fi
+                    ;;
+                redis)
+                    if [[ "$mount_lower" == */redis* ]] || \
+                       [[ "$mount_lower" == */data ]] || \
+                       [[ "$mount_lower" == */db-data ]]; then
+                        should_exclude=true
+                    fi
+                    ;;
+            esac
+
+            if $should_exclude; then
+                log_info "Auto-excluding DB bind mount: $mount_src ($cname/$db_type)"
+                _opts+=("--exclude" "$mount_src")
+            fi
+        done <<< "$mounts"
+    done <<< "$discovered"
+}
+
+# ──────────────────────────────────────────────
 # Repository management
 # ──────────────────────────────────────────────
 restic_repo_exists() {
@@ -43,6 +112,30 @@ restic_init_repo() {
         log_error "Failed to initialize restic repository"
         return 1
     fi
+}
+
+# ──────────────────────────────────────────────
+# Connectivity pre-check
+# ──────────────────────────────────────────────
+restic_check_connectivity() {
+    _setup_restic_env
+
+    log_info "Checking repository connectivity..."
+
+    if [[ "${DRY_RUN:-no}" == "yes" ]]; then
+        log_info "[DRY RUN] Would check repository connectivity"
+        return 0
+    fi
+
+    # Try to list snapshots — this validates SFTP connectivity, auth, and repo access
+    if restic snapshots --json --last --quiet 2>/dev/null >/dev/null; then
+        log_info "Repository is reachable"
+        return 0
+    fi
+
+    log_error "Cannot reach restic repository: $RESTIC_REPOSITORY"
+    log_error "Check SFTP connectivity, Tailscale status, and SSH keys"
+    return 1
 }
 
 # ──────────────────────────────────────────────
@@ -78,8 +171,17 @@ restic_backup() {
     fi
 
     if [[ ${#backup_paths[@]} -eq 0 ]]; then
-        log_error "No valid backup paths found"
+        log_error "No valid backup paths found — all INCLUDE_PATHS are missing and no database dumps exist"
         return 1
+    fi
+
+    # Warn if only dump directory exists (no filesystem paths)
+    local has_non_dump_paths=false
+    for p in "${backup_paths[@]}"; do
+        [[ "$p" != "${DB_DUMP_DIR:-}" ]] && has_non_dump_paths=true
+    done
+    if ! $has_non_dump_paths; then
+        log_warn "No filesystem paths to backup — only database dumps will be included. Check INCLUDE_PATHS in config."
     fi
 
     # Build tags
@@ -98,6 +200,13 @@ restic_backup() {
 
     # Common exclusions
     exclude_opts+=("--exclude-caches")
+
+    # Auto-exclude bind-mounted database data directories
+    # DB files are backed up via logical dumps (mysqldump/pg_dump), so raw data
+    # files are both redundant and potentially inconsistent if copied by restic.
+    if [[ "${DOCKER_ENABLED:-yes}" == "yes" ]] && command -v docker &>/dev/null; then
+        _exclude_db_bind_mounts exclude_opts
+    fi
 
     # Bandwidth limit
     local bw_opts=()
