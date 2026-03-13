@@ -689,6 +689,135 @@ show_system_health() {
 }
 
 # ──────────────────────────────────────────────
+# Fail2ban management
+# ──────────────────────────────────────────────
+manage_fail2ban() {
+    while true; do
+        # Get current status
+        local banned_count=0
+        local banned_list=""
+        if systemctl is-active fail2ban &>/dev/null; then
+            banned_count=$(fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $NF}') || true
+            banned_list=$(fail2ban-client status sshd 2>/dev/null | grep 'Banned IP list' | sed 's/.*Banned IP list:\s*//') || true
+        else
+            msg_box "Fail2ban" "fail2ban is not running."
+            return
+        fi
+
+        local choice
+        choice=$($DIALOG --title "Fail2ban — ${banned_count:-0} banned IP(s)" \
+            --menu "Manage banned IPs:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+            "status"    "View fail2ban status" \
+            "unban"     "Unban a specific IP" \
+            "unban-all" "Unban ALL IPs" \
+            "back"      "Back to main menu" \
+            3>&1 1>&2 2>&3) || break
+
+        case "$choice" in
+            status)    _f2b_status ;;
+            unban)     _f2b_unban_ip ;;
+            unban-all) _f2b_unban_all ;;
+            back|"")   break ;;
+        esac
+    done
+}
+
+_f2b_status() {
+    local output=""
+    output+="FAIL2BAN STATUS\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
+
+    local f2b_status
+    f2b_status=$(fail2ban-client status sshd 2>&1) || true
+    output+="${f2b_status}\n\n"
+
+    # Show banned IP details
+    local banned_list
+    banned_list=$(fail2ban-client status sshd 2>/dev/null | grep 'Banned IP list' | sed 's/.*Banned IP list:\s*//') || true
+
+    if [[ -n "$banned_list" ]]; then
+        output+="BANNED IPS\n"
+        output+="$(printf '%0.s-' {1..70})\n"
+        for ip in $banned_list; do
+            # Try to get whois/reverse DNS info
+            local hostname
+            hostname=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}') || hostname=""
+            if [[ -n "$hostname" ]]; then
+                output+="  ${ip}  (${hostname})\n"
+            else
+                output+="  ${ip}\n"
+            fi
+        done
+    else
+        output+="No IPs currently banned.\n"
+    fi
+
+    msg_scroll "Fail2ban Status" "$(echo -e "$output")"
+}
+
+_f2b_unban_ip() {
+    local banned_list
+    banned_list=$(fail2ban-client status sshd 2>/dev/null | grep 'Banned IP list' | sed 's/.*Banned IP list:\s*//') || true
+
+    if [[ -z "$banned_list" ]]; then
+        msg_box "Unban IP" "No IPs currently banned."
+        return
+    fi
+
+    # Build menu of banned IPs
+    local ips=()
+    for ip in $banned_list; do
+        local hostname
+        hostname=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}') || hostname="unknown"
+        ips+=("$ip" "$hostname")
+    done
+
+    local choice
+    choice=$($DIALOG --title "Unban IP" \
+        --menu "Select IP to unban:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${ips[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    if fail2ban-client set sshd unbanip "$choice" &>/dev/null; then
+        msg_box "Unban IP" "Successfully unbanned: ${choice}"
+    else
+        msg_box "Unban IP" "Failed to unban ${choice}. Check fail2ban logs."
+    fi
+}
+
+_f2b_unban_all() {
+    local banned_list
+    banned_list=$(fail2ban-client status sshd 2>/dev/null | grep 'Banned IP list' | sed 's/.*Banned IP list:\s*//') || true
+
+    if [[ -z "$banned_list" ]]; then
+        msg_box "Unban All" "No IPs currently banned."
+        return
+    fi
+
+    local count=0
+    for ip in $banned_list; do
+        ((count++)) || true
+    done
+
+    if ! yesno "Unban All" "Unban all ${count} banned IP(s)?\n\n${banned_list}"; then
+        return
+    fi
+
+    local errors=0
+    for ip in $banned_list; do
+        if ! fail2ban-client set sshd unbanip "$ip" &>/dev/null; then
+            ((errors++)) || true
+        fi
+    done
+
+    if [[ $errors -eq 0 ]]; then
+        msg_box "Unban All" "Successfully unbanned ${count} IP(s)."
+    else
+        msg_box "Unban All" "Unbanned with ${errors} error(s). Check fail2ban logs."
+    fi
+}
+
+# ──────────────────────────────────────────────
 # User management
 # ──────────────────────────────────────────────
 manage_users() {
@@ -1021,6 +1150,7 @@ main_menu() {
             "alerts"     "Stale backup alerts" \
             "storage"    "Storage breakdown (computes sizes)" \
             "health"     "System health (SMB, SSH, fail2ban)" \
+            "fail2ban"   "Fail2ban: view/unban IPs" \
             "logs"       "View auth logs" \
             "users"      "User management" \
             "quit"       "Quit" \
@@ -1033,6 +1163,7 @@ main_menu() {
             alerts)   show_stale_alerts ;;
             storage)  show_storage ;;
             health)   show_system_health ;;
+            fail2ban) manage_fail2ban ;;
             logs)     show_auth_logs ;;
             users)    manage_users ;;
             quit|"")  break ;;

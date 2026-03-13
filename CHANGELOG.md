@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.0] - 2026-03-14
+
+### Added
+- **Fail2ban management** in gateway manager: view banned IPs with reverse DNS, unban a specific IP, or unban all — accessible from the main menu
+
 ## [1.6.6] - 2026-03-14
 
 ### Changed
