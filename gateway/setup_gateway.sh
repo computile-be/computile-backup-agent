@@ -98,7 +98,7 @@ EOF
     mkdir -p "$BACKUP_BASE"
 
     # Add fstab entry
-    local fstab_entry="//${smb_server}/${smb_share}  ${BACKUP_BASE}  cifs  credentials=${SMB_CREDENTIALS},uid=0,gid=0,dir_mode=0755,file_mode=0644,iocharset=utf8,nofail,_netdev  0  0"
+    local fstab_entry="//${smb_server}/${smb_share}  ${BACKUP_BASE}  cifs  credentials=${SMB_CREDENTIALS},vers=3.0,noperm,nofail,_netdev  0  0"
 
     if grep -qF "$BACKUP_BASE" /etc/fstab 2>/dev/null; then
         warn "An entry for $BACKUP_BASE already exists in /etc/fstab — skipping"
@@ -135,7 +135,6 @@ setup_ssh() {
 # Restrict backup users to SFTP only
 
 Match Group backupusers
-    ChrootDirectory /srv/backups/%u
     ForceCommand internal-sftp
     AllowTcpForwarding no
     X11Forwarding no

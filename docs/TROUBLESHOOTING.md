@@ -17,7 +17,7 @@ sftp backup-gateway
 tailscale ping <gateway-ip>
 
 # Tester manuellement restic
-export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/data/vps-01"
+export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/srv/backups/backup-client/data/vps-01"
 export RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 restic snapshots
 ```

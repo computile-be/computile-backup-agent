@@ -117,11 +117,11 @@ chmod 750 "$DATA_DIR"
 
 # Create VPS subdirectory if specified
 if [[ -n "$VPS_ID" ]]; then
-    local_vps_dir="${DATA_DIR}/${VPS_ID}"
-    mkdir -p "$local_vps_dir"
-    chown "$USERNAME:backupusers" "$local_vps_dir"
-    chmod 750 "$local_vps_dir"
-    info "Created VPS directory: $local_vps_dir"
+    vps_dir="${DATA_DIR}/${VPS_ID}"
+    mkdir -p "$vps_dir"
+    chown "$USERNAME:backupusers" "$vps_dir"
+    chmod 750 "$vps_dir"
+    info "Created VPS directory: $vps_dir"
 fi
 
 # ──────────────────────────────────────────────
@@ -168,9 +168,9 @@ echo "  SSH keys:         $AUTH_KEYS"
 echo
 echo "From a VPS, configure restic repository as:"
 if [[ -n "$VPS_ID" ]]; then
-    echo "  sftp:${USERNAME}@<gateway-ip>:/data/${VPS_ID}"
+    echo "  sftp:${USERNAME}@<gateway-ip>:${DATA_DIR}/${VPS_ID}"
 else
-    echo "  sftp:${USERNAME}@<gateway-ip>:/data/<vps-id>"
+    echo "  sftp:${USERNAME}@<gateway-ip>:${DATA_DIR}/<vps-id>"
 fi
 echo
 echo "To add an SSH key later:"

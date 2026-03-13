@@ -108,7 +108,7 @@ HOST_ID="vps-coolify-01"
 ENVIRONMENT="prod"
 ROLE="coolify"
 
-RESTIC_REPOSITORY="sftp:backup-startup-xyz@backup-gateway:/data/vps-coolify-01"
+RESTIC_REPOSITORY="sftp:backup-startup-xyz@backup-gateway:/srv/backups/backup-startup-xyz/data/vps-coolify-01"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 
 BACKUP_ROOT="/var/backups/computile"
@@ -143,7 +143,7 @@ HOST_ID="vps-forge-01"
 ENVIRONMENT="prod"
 ROLE="forge"
 
-RESTIC_REPOSITORY="sftp:backup-agency-abc@backup-gateway:/data/vps-forge-01"
+RESTIC_REPOSITORY="sftp:backup-agency-abc@backup-gateway:/srv/backups/backup-agency-abc/data/vps-forge-01"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 
 BACKUP_ROOT="/var/backups/computile"
@@ -175,7 +175,7 @@ HOST_ID="vps-hybrid-01"
 ENVIRONMENT="prod"
 ROLE="hybrid"
 
-RESTIC_REPOSITORY="sftp:backup-bigcorp@backup-gateway:/data/vps-hybrid-01"
+RESTIC_REPOSITORY="sftp:backup-bigcorp@backup-gateway:/srv/backups/backup-bigcorp/data/vps-hybrid-01"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 
 BACKUP_ROOT="/var/backups/computile"
@@ -219,7 +219,7 @@ HOST_ID="vps-docker-01"
 ENVIRONMENT="prod"
 ROLE="docker"
 
-RESTIC_REPOSITORY="sftp:backup-techco@backup-gateway:/data/vps-docker-01"
+RESTIC_REPOSITORY="sftp:backup-techco@backup-gateway:/srv/backups/backup-techco/data/vps-docker-01"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 
 BACKUP_ROOT="/var/backups/computile"

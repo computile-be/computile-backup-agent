@@ -1,13 +1,12 @@
 # computile-backup — SSH configuration for backup gateway
 # Place in /etc/ssh/sshd_config.d/computile-backup.conf
 #
-# This restricts members of the 'backupusers' group to SFTP-only
-# access within their chrooted directory.
+# This restricts members of the 'backupusers' group to SFTP-only access.
+# Note: ChrootDirectory is not used because SMB/CIFS mounts don't support
+# per-directory ownership required by OpenSSH chroot. Isolation relies on
+# Tailscale (private network) + SSH key auth + SFTP-only restriction.
 
 Match Group backupusers
-    # Chroot each user to /srv/backups/backup-<client-id>
-    # %u is replaced by the username (e.g., backup-client-a)
-    ChrootDirectory /srv/backups/%u
     ForceCommand internal-sftp
     AllowTcpForwarding no
     X11Forwarding no

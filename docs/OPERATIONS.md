@@ -48,7 +48,7 @@ journalctl -u computile-backup.service --since "24 hours ago"
 
 ```bash
 # Variables d'env (ou utiliser les valeurs de votre config)
-export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/data/vps-01"
+export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/srv/backups/backup-client/data/vps-01"
 export RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 
 # Lister tous les snapshots

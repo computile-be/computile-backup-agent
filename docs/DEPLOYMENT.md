@@ -160,7 +160,7 @@ Paramètres essentiels à modifier :
 ```bash
 CLIENT_ID="client-a"
 HOST_ID="vps-prod-01"
-RESTIC_REPOSITORY="sftp:backup-client-a@backup-gateway:/data/vps-prod-01"
+RESTIC_REPOSITORY="sftp:backup-client-a@backup-gateway:/srv/backups/backup-client-a/data/vps-prod-01"
 ```
 
 ### 5.2 Configurer le mot de passe SMTP
@@ -207,7 +207,7 @@ sudo computile-backup --init
 sudo computile-backup --verbose
 
 # Vérifier le snapshot
-sudo restic -r "sftp:backup-client-a@backup-gateway:/data/vps-prod-01" \
+sudo restic -r "sftp:backup-client-a@backup-gateway:/srv/backups/backup-client-a/data/vps-prod-01" \
     --password-file /etc/computile-backup/restic-password \
     snapshots
 ```

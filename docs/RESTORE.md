@@ -13,7 +13,7 @@ Ce document couvre les procédures de restauration depuis les backups restic.
 Pour toutes les commandes ci-dessous :
 
 ```bash
-export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/data/vps-01"
+export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/srv/backups/backup-client/data/vps-01"
 export RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 ```
 
@@ -225,7 +225,7 @@ Restaurer ou recréer la clé SSH, configurer `/root/.ssh/config`.
 ### 7.4 Restaurer les fichiers système
 
 ```bash
-export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/data/vps-01"
+export RESTIC_REPOSITORY="sftp:backup-client@backup-gateway:/srv/backups/backup-client/data/vps-01"
 export RESTIC_PASSWORD_FILE="/path/to/restic-password"
 
 # Restaurer /etc, /home, etc.

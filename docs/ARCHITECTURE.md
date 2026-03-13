@@ -116,7 +116,7 @@ Les dumps sont stockés localement puis inclus dans le snapshot restic.
 - **Chiffrement restic** : toutes les données sont chiffrées avec le mot de passe du repository
 - **Transport SSH** : chiffrement en transit via SFTP
 - **Réseau Tailscale** : communication VPS ↔ gateway sur réseau privé
-- **Isolation SFTP** : chaque client est chrooted, pas de shell
+- **Isolation SFTP** : chaque client est restreint à SFTP uniquement, pas de shell
 - **Clés SSH** : authentification par clé uniquement (pas de mot de passe)
 - **Permissions** : fichiers de config et secrets en 600, répertoires en 700
 - **fail2ban** : protection contre le brute-force SSH
