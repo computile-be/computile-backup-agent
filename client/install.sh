@@ -763,29 +763,53 @@ update_agent() {
     # Back up current version
     backup_current_scripts
 
-    # Update scripts
+    # Update scripts (critical — abort on failure)
     info "Updating agent scripts..."
     install_agent
 
-    # Update systemd units (with diff)
-    _update_systemd_units
+    # Non-critical steps: continue on failure but report errors
+    local update_errors=0
 
-    # Update config (detect new parameters)
-    _update_config
+    info "Updating systemd units..."
+    if ! _update_systemd_units; then
+        error "Systemd units update failed — continuing"
+        ((update_errors++)) || true
+    fi
 
-    # Update logrotate
-    install_logrotate
+    info "Checking config for new parameters..."
+    if ! _update_config; then
+        error "Config migration failed — continuing (your config is unchanged)"
+        ((update_errors++)) || true
+    fi
 
-    # Update restic if needed
-    install_restic
+    info "Updating logrotate..."
+    if ! install_logrotate; then
+        error "Logrotate update failed — continuing"
+        ((update_errors++)) || true
+    fi
+
+    info "Checking restic..."
+    if ! install_restic; then
+        error "Restic check/update failed — continuing"
+        ((update_errors++)) || true
+    fi
 
     # Verify
     local verify_version
-    verify_version=$("${INSTALL_BIN}/computile-backup" --version 2>/dev/null | awk '{print $NF}')
-    info "Verified: ${INSTALL_BIN}/computile-backup reports v${verify_version}"
+    verify_version=$("${INSTALL_BIN}/computile-backup" --version 2>/dev/null | awk '{print $NF}') || true
+    if [[ -n "$verify_version" ]]; then
+        info "Verified: ${INSTALL_BIN}/computile-backup reports v${verify_version}"
+    else
+        error "Could not verify installed version — ${INSTALL_BIN}/computile-backup --version failed"
+        ((update_errors++)) || true
+    fi
 
     # Show changelog
     _show_changelog "$installed_version" "$new_version"
+
+    if [[ $update_errors -gt 0 ]]; then
+        warn "$update_errors non-critical step(s) had errors (see above)"
+    fi
 
     echo
     echo "════════════════════════════════════════════════"

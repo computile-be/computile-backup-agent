@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.3] - 2026-03-13
+
+### Fixed
+- `install.sh --update` now reports which specific step failed instead of dying silently — non-critical steps (systemd, config migration, logrotate, restic) continue on failure with error details
+
 ## [1.2.2] - 2026-03-13
 
 ### Fixed
