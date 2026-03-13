@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.2] - 2026-03-14
+
+### Fixed
+- **Recovery metadata sync diagnostic**: `sync_meta_to_gateway` now logs SFTP errors instead of swallowing them, warns when password file is missing, and reports the number of files synced — makes it easy to diagnose why metadata might not appear on the gateway
+
 ## [1.8.1] - 2026-03-14
 
 ### Added

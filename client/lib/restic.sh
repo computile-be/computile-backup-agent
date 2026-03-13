@@ -426,6 +426,7 @@ sync_meta_to_gateway() {
     meta_path=$(dirname "$repo_path")/_meta/${HOST_ID}
 
     log_info "Syncing recovery metadata to gateway..."
+    log_debug "  Target: ${sftp_target}:${meta_path}"
 
     if [[ "${DRY_RUN:-no}" == "yes" ]]; then
         log_info "[DRY RUN] Would sync meta to ${sftp_target}:${meta_path}"
@@ -441,30 +442,58 @@ sync_meta_to_gateway() {
     echo "-mkdir $(dirname "$repo_path")/_meta" >> "$batch_file"
     echo "-mkdir ${meta_path}" >> "$batch_file"
 
+    # Track what we're uploading
+    local file_count=0
+
     # Upload restic password (critical — without this, backups are unrecoverable)
     if [[ -f "${RESTIC_PASSWORD_FILE:-}" ]]; then
         echo "put ${RESTIC_PASSWORD_FILE} ${meta_path}/restic-password" >> "$batch_file"
+        ((file_count++)) || true
+    else
+        log_warn "  Restic password file not found: ${RESTIC_PASSWORD_FILE:-<not set>}"
     fi
 
     # Upload agent config (useful for re-deployment)
     local config_file="${CONFIG_FILE:-/etc/computile-backup/backup-agent.conf}"
     if [[ -f "$config_file" ]]; then
         echo "put ${config_file} ${meta_path}/backup-agent.conf" >> "$batch_file"
+        ((file_count++)) || true
+    else
+        log_debug "  Config file not found: ${config_file}"
     fi
 
     # Upload SSH public key (useful for re-authorizing a rebuilt VPS)
+    local key_found=false
     for key_path in /root/.ssh/backup_ed25519.pub /etc/computile-backup/ssh/id_ed25519.pub; do
         if [[ -f "$key_path" ]]; then
             echo "put ${key_path} ${meta_path}/ssh-public-key.pub" >> "$batch_file"
+            ((file_count++)) || true
+            key_found=true
             break
         fi
     done
+    if ! $key_found; then
+        log_debug "  No SSH public key found for meta sync"
+    fi
+
+    if [[ $file_count -eq 0 ]]; then
+        log_warn "No recovery metadata files found to sync"
+        return 0
+    fi
 
     # Execute SFTP batch (best-effort: don't fail the backup if this fails)
-    if sftp -o ConnectTimeout=10 -o BatchMode=yes -b "$batch_file" "${sftp_target}" &>/dev/null; then
-        log_info "Recovery metadata synced to gateway (_meta/${HOST_ID}/)"
+    local sftp_output
+    local sftp_rc=0
+    sftp_output=$(sftp -o ConnectTimeout=10 -o BatchMode=yes -b "$batch_file" "${sftp_target}" 2>&1) || sftp_rc=$?
+
+    if [[ $sftp_rc -eq 0 ]]; then
+        log_info "Recovery metadata synced to gateway (_meta/${HOST_ID}/): ${file_count} file(s)"
     else
-        log_warn "Failed to sync metadata to gateway (non-critical)"
+        log_warn "Failed to sync metadata to gateway (exit code ${sftp_rc})"
+        # Log SFTP errors for diagnosis
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && log_warn "  sftp: $line"
+        done <<< "$sftp_output"
     fi
 }
 
