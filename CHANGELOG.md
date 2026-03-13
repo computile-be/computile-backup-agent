@@ -4,6 +4,27 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] - 2026-03-13
+
+### Added
+- **TUI manager** (`computile-manager`): interactive terminal UI for daily operations
+  - Status dashboard (version, config, timer, last backup, disk usage)
+  - Run backup (full or dry-run) directly from the menu
+  - View restic snapshots, backup logs, and systemd journal
+  - Repository health check (restic check + stats)
+  - SSH connectivity test to backup gateway
+  - Docker container discovery overview
+  - System health check (prerequisites, SSH keys, secrets, Tailscale)
+  - View/edit configuration with secret masking
+  - Timer management (enable, disable, trigger)
+  - One-click agent update (git pull + install --update)
+- Config migration during updates: detects new parameters from example config, prompts interactively or appends commented out
+- Shell scripts marked as executable in git
+
+### Changed
+- `install.sh` now installs `computile-manager` alongside `computile-backup`
+- Rollback includes the TUI manager
+
 ## [1.1.0] - 2026-03-13
 
 ### Added

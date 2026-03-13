@@ -188,10 +188,14 @@ install_agent() {
     # Main script
     install -m 0755 "${SCRIPT_DIR}/backup-agent.sh" "${INSTALL_BIN}/computile-backup"
 
+    # TUI manager
+    install -m 0755 "${SCRIPT_DIR}/computile-manager.sh" "${INSTALL_BIN}/computile-manager"
+
     # Record source repo path for future updates
     echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
 
     info "Agent installed to ${INSTALL_BIN}/computile-backup"
+    info "Manager installed to ${INSTALL_BIN}/computile-manager"
 }
 
 # ──────────────────────────────────────────────
@@ -685,9 +689,11 @@ backup_current_scripts() {
     # Back up VERSION
     [[ -f "$INSTALL_LIB/VERSION" ]] && cp "$INSTALL_LIB/VERSION" "$rollback_dir/"
 
-    # Back up main script
+    # Back up main script and manager
     [[ -f "${INSTALL_BIN}/computile-backup" ]] && \
         cp "${INSTALL_BIN}/computile-backup" "$rollback_dir/"
+    [[ -f "${INSTALL_BIN}/computile-manager" ]] && \
+        cp "${INSTALL_BIN}/computile-manager" "$rollback_dir/"
 
     # Back up systemd units
     mkdir -p "$rollback_dir/systemd"
@@ -1062,9 +1068,11 @@ rollback_agent() {
     # Restore VERSION
     [[ -f "$rollback_dir/VERSION" ]] && install -m 0644 "$rollback_dir/VERSION" "$INSTALL_LIB/"
 
-    # Restore main script
+    # Restore main script and manager
     [[ -f "$rollback_dir/computile-backup" ]] && \
         install -m 0755 "$rollback_dir/computile-backup" "${INSTALL_BIN}/computile-backup"
+    [[ -f "$rollback_dir/computile-manager" ]] && \
+        install -m 0755 "$rollback_dir/computile-manager" "${INSTALL_BIN}/computile-manager"
 
     # Restore systemd units
     local systemd_changed=false

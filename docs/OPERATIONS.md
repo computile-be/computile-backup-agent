@@ -1,5 +1,30 @@
 # Opérations
 
+## Manager TUI
+
+Le manager TUI fournit une interface interactive pour les opérations courantes :
+
+```bash
+sudo computile-manager
+```
+
+Fonctionnalités :
+- **Status dashboard** : vue d'ensemble (version, config, timer, dernier backup, espace disque)
+- **Run backup** : lancer un backup complet ou un dry-run
+- **View snapshots** : lister les snapshots restic
+- **View logs** : consulter les logs de backup et le journal systemd
+- **Repository health** : vérifier l'intégrité du repository restic
+- **SSH connectivity** : tester la connexion SSH vers le gateway
+- **Docker containers** : voir les conteneurs détectés (avec auto-discovery DB)
+- **System health** : vérifier les prérequis, clés SSH, fichiers secrets, Tailscale
+- **Configuration** : voir/éditer la configuration
+- **Timer management** : activer, désactiver, déclencher le timer systemd
+- **Update agent** : mettre à jour l'agent (git pull + install --update)
+
+Nécessite `whiptail` (pré-installé sur Debian/Ubuntu) ou `dialog`.
+
+---
+
 ## Mise à jour de l'agent
 
 ### Mettre à jour

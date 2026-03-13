@@ -12,6 +12,7 @@ Multi-client backup agent for Linux VPS servers. Uses **restic** for incremental
 - Systemd timer for automated daily backups
 - Works with Coolify, Laravel Forge, hybrid, or bare Linux servers
 - SFTP gateway with per-client isolation over Tailscale
+- Interactive TUI manager (`computile-manager`) for daily operations
 
 ## Architecture
 
@@ -39,6 +40,9 @@ cd /opt/computile-backup-agent/client
 sudo bash install.sh
 sudo computile-backup --init --verbose
 sudo systemctl enable --now computile-backup.timer
+
+# Launch TUI manager
+sudo computile-manager
 ```
 
 ### Updating an existing installation
