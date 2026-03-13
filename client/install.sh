@@ -764,6 +764,9 @@ update_agent() {
     # Update systemd units (with diff)
     _update_systemd_units
 
+    # Update config (detect new parameters)
+    _update_config
+
     # Update logrotate
     install_logrotate
 
@@ -785,6 +788,171 @@ update_agent() {
     echo "Rollback if needed:  sudo ./install.sh --rollback"
     echo "Test backup:         sudo computile-backup --dry-run --verbose"
     echo "════════════════════════════════════════════════"
+}
+
+# ──────────────────────────────────────────────
+# Config migration: detect and add new parameters
+# ──────────────────────────────────────────────
+_update_config() {
+    local config_file="${CONFIG_DIR}/backup-agent.conf"
+    local example_file="${SCRIPT_DIR}/backup-agent.conf.example"
+
+    if [[ ! -f "$example_file" ]]; then
+        return 0
+    fi
+
+    if [[ ! -f "$config_file" ]]; then
+        return 0
+    fi
+
+    # Extract variable names from both files (ignoring comments and arrays)
+    # Pattern: lines starting with VARNAME= (not commented out)
+    local -a example_vars=()
+    local -a config_vars=()
+
+    while IFS= read -r line; do
+        # Match uncommented variable assignments: VAR_NAME="..." or VAR_NAME=value
+        if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+            example_vars+=("${BASH_REMATCH[1]}")
+        fi
+    done < "$example_file"
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+            config_vars+=("${BASH_REMATCH[1]}")
+        fi
+        # Also detect commented-out vars (user chose to leave them commented)
+        if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+            config_vars+=("${BASH_REMATCH[1]}")
+        fi
+    done < "$config_file"
+
+    # Find variables in example that are missing from config
+    local -a missing_vars=()
+    for evar in "${example_vars[@]}"; do
+        local found=false
+        for cvar in "${config_vars[@]}"; do
+            if [[ "$evar" == "$cvar" ]]; then
+                found=true
+                break
+            fi
+        done
+        if ! $found; then
+            missing_vars+=("$evar")
+        fi
+    done
+
+    if [[ ${#missing_vars[@]} -eq 0 ]]; then
+        info "Config file is up to date — no new parameters"
+        return 0
+    fi
+
+    info "New config parameters detected: ${missing_vars[*]}"
+
+    # For each missing var, extract its block from the example file
+    # (the variable line + preceding comment lines)
+    local -a new_blocks=()
+
+    for mvar in "${missing_vars[@]}"; do
+        local block=""
+        local prev_comments=""
+
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*# ]]; then
+                # Accumulate comment lines
+                prev_comments+="${line}"$'\n'
+            elif [[ "$line" =~ ^[[:space:]]*${mvar}= ]] || [[ "$line" =~ ^[[:space:]]*#[[:space:]]*${mvar}= ]]; then
+                # Found the variable — include preceding comments
+                block="${prev_comments}${line}"
+                break
+            else
+                # Non-comment, non-matching line — reset accumulated comments
+                prev_comments=""
+            fi
+        done < "$example_file"
+
+        if [[ -n "$block" ]]; then
+            new_blocks+=("$block")
+        fi
+    done
+
+    if [[ ${#new_blocks[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Show what will be added
+    echo
+    echo "──── New config parameters ────"
+    for block in "${new_blocks[@]}"; do
+        echo "$block"
+    done
+    echo "───────────────────────────────"
+    echo
+
+    # Interactive: ask for values for important new params, or just append
+    if [[ "$INTERACTIVE" == true ]]; then
+        local do_add
+        do_add=$(prompt_yesno "Add these parameters to your config?" "yes")
+        if [[ "$do_add" != "yes" ]]; then
+            warn "Skipped config update. You may need to add these parameters manually."
+            return 0
+        fi
+
+        # For each missing var, prompt for a value if it seems important
+        local additions=""
+        additions+=$'\n'"# ── Added by update to v$(get_new_version) on $(date '+%Y-%m-%d') ──"$'\n'
+
+        for mvar in "${missing_vars[@]}"; do
+            # Get the default/example value from the example file
+            local example_line=""
+            local is_commented=false
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^[[:space:]]*${mvar}= ]]; then
+                    example_line="$line"
+                    break
+                elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*${mvar}= ]]; then
+                    example_line="$line"
+                    is_commented=true
+                    break
+                fi
+            done < "$example_file"
+
+            if $is_commented; then
+                # Commented in example = truly optional, add as-is
+                additions+="${example_line}"$'\n'
+            else
+                # Active in example — prompt for value
+                local default_val=""
+                if [[ "$example_line" =~ =[\"\']?([^\"\']*)[\"\']? ]]; then
+                    default_val="${BASH_REMATCH[1]}"
+                fi
+
+                local user_val
+                user_val=$(prompt_value "${mvar}" "$default_val")
+                if [[ -n "$user_val" ]]; then
+                    additions+="${mvar}=\"${user_val}\""$'\n'
+                else
+                    additions+="# ${mvar}=\"${default_val}\""$'\n'
+                fi
+            fi
+        done
+
+        # Append to config
+        echo "$additions" >> "$config_file"
+        info "Config updated with new parameters"
+
+    else
+        # Non-interactive: append all as comments
+        {
+            echo ""
+            echo "# ── Added by update to v$(get_new_version) on $(date '+%Y-%m-%d') ──"
+            for block in "${new_blocks[@]}"; do
+                # Comment out any active lines (non-interactive = safe default)
+                echo "$block" | sed 's/^[[:space:]]*\([A-Z_][A-Z0-9_]*=\)/# \1/'
+            done
+        } >> "$config_file"
+        info "New parameters appended (commented out). Edit ${config_file} to activate them."
+    fi
 }
 
 # ──────────────────────────────────────────────
