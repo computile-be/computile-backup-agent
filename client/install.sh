@@ -797,168 +797,206 @@ update_agent() {
 }
 
 # ──────────────────────────────────────────────
-# Config migration: detect and add new parameters
+# Config migration: detect and add new sections
 # ──────────────────────────────────────────────
 _update_config() {
     local config_file="${CONFIG_DIR}/backup-agent.conf"
     local example_file="${SCRIPT_DIR}/backup-agent.conf.example"
 
-    if [[ ! -f "$example_file" ]]; then
+    if [[ ! -f "$example_file" ]] || [[ ! -f "$config_file" ]]; then
         return 0
     fi
 
-    if [[ ! -f "$config_file" ]]; then
-        return 0
-    fi
-
-    # Extract variable names from both files (including commented-out ones)
-    local -a example_vars=()
+    # Collect all variable names present in the installed config
     local -a config_vars=()
-
-    while IFS= read -r line; do
-        # Match active variable assignments: VAR_NAME="..." or VAR_NAME=value
-        if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
-            example_vars+=("${BASH_REMATCH[1]}")
-        # Also match commented-out variables: # VAR_NAME="..."
-        elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
-            example_vars+=("${BASH_REMATCH[1]}")
-        fi
-    done < "$example_file"
-
     while IFS= read -r line; do
         if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
             config_vars+=("${BASH_REMATCH[1]}")
-        # Also detect commented-out vars (user chose to leave them commented)
         elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
             config_vars+=("${BASH_REMATCH[1]}")
         fi
     done < "$config_file"
 
-    # Find variables in example that are missing from config
-    local -a missing_vars=()
-    for evar in "${example_vars[@]}"; do
-        local found=false
+    _var_in_config() {
+        local var="$1"
         for cvar in "${config_vars[@]}"; do
-            if [[ "$evar" == "$cvar" ]]; then
-                found=true
-                break
-            fi
+            [[ "$var" == "$cvar" ]] && return 0
         done
-        if ! $found; then
-            missing_vars+=("$evar")
+        return 1
+    }
+
+    # Parse example config into sections
+    # Format: delimiter line / title line / delimiter line / body lines
+    # e.g.:  # ──────────────────────────────────────────────
+    #        # Healthcheck ping (healthchecks.io, ...)
+    #        # ──────────────────────────────────────────────
+    #        content...
+
+    local -a elines=()
+    while IFS= read -r line; do
+        elines+=("$line")
+    done < "$example_file"
+    local etotal=${#elines[@]}
+
+    local -a section_titles=()
+    local -a section_bodies=()
+
+    local ei=0
+    while [[ $ei -lt $etotal ]]; do
+        if [[ "${elines[$ei]}" =~ ^#\ ─{3,} ]]; then
+            local enext=$((ei + 1))
+            local enext2=$((ei + 2))
+            if [[ $enext2 -lt $etotal ]] && [[ "${elines[$enext2]}" =~ ^#\ ─{3,} ]]; then
+                local stitle="${elines[$enext]}"
+                local body_start=$((enext2 + 1))
+
+                local sbody=""
+                local ej=$body_start
+                while [[ $ej -lt $etotal ]]; do
+                    [[ "${elines[$ej]}" =~ ^#\ ─{3,} ]] && break
+                    sbody+="${elines[$ej]}"$'\n'
+                    ((ej++))
+                done
+
+                section_titles+=("$stitle")
+                section_bodies+=("$sbody")
+                ei=$ej
+                continue
+            fi
+        fi
+        ((ei++))
+    done
+
+    # For each section, check if it contains variables missing from the config
+    local -a missing_sections_idx=()
+    local -a all_missing_vars=()
+
+    for i in "${!section_bodies[@]}"; do
+        local body="${section_bodies[$i]}"
+        local has_missing=false
+
+        while IFS= read -r line; do
+            local var=""
+            if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+                var="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+                var="${BASH_REMATCH[1]}"
+            fi
+            if [[ -n "$var" ]] && ! _var_in_config "$var"; then
+                has_missing=true
+                all_missing_vars+=("$var")
+            fi
+        done <<< "$body"
+
+        if $has_missing; then
+            missing_sections_idx+=("$i")
         fi
     done
 
-    if [[ ${#missing_vars[@]} -eq 0 ]]; then
+    if [[ ${#missing_sections_idx[@]} -eq 0 ]]; then
         info "Config file is up to date — no new parameters"
         return 0
     fi
 
-    info "New config parameters detected: ${missing_vars[*]}"
+    info "New config parameters detected: ${all_missing_vars[*]}"
 
-    # For each missing var, extract its block from the example file
-    # (the variable line + preceding comment lines)
-    local -a new_blocks=()
+    # Build section blocks to add
+    local -a section_blocks=()
+    for i in "${missing_sections_idx[@]}"; do
+        local title="${section_titles[$i]}"
+        local body="${section_bodies[$i]}"
 
-    for mvar in "${missing_vars[@]}"; do
         local block=""
-        local prev_comments=""
-
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^[[:space:]]*# ]]; then
-                # Accumulate comment lines
-                prev_comments+="${line}"$'\n'
-            elif [[ "$line" =~ ^[[:space:]]*${mvar}= ]] || [[ "$line" =~ ^[[:space:]]*#[[:space:]]*${mvar}= ]]; then
-                # Found the variable — include preceding comments
-                block="${prev_comments}${line}"
-                break
-            else
-                # Non-comment, non-matching line — reset accumulated comments
-                prev_comments=""
-            fi
-        done < "$example_file"
-
-        if [[ -n "$block" ]]; then
-            new_blocks+=("$block")
-        fi
+        block+="# ──────────────────────────────────────────────"$'\n'
+        block+="${title}"$'\n'
+        block+="# ──────────────────────────────────────────────"$'\n'
+        block+="${body}"
+        section_blocks+=("$block")
     done
-
-    if [[ ${#new_blocks[@]} -eq 0 ]]; then
-        return 0
-    fi
 
     # Show what will be added
     echo
-    echo "──── New config parameters ────"
-    for block in "${new_blocks[@]}"; do
+    echo "──── New config sections ────"
+    for block in "${section_blocks[@]}"; do
         echo "$block"
     done
-    echo "───────────────────────────────"
+    echo "─────────────────────────────"
     echo
 
-    # Interactive: ask for values for important new params, or just append
     if [[ "$INTERACTIVE" == true ]]; then
         local do_add
-        do_add=$(prompt_yesno "Add these parameters to your config?" "yes")
+        do_add=$(prompt_yesno "Add these sections to your config?" "yes")
         if [[ "$do_add" != "yes" ]]; then
-            warn "Skipped config update. You may need to add these parameters manually."
+            warn "Skipped config update. You may need to add these sections manually."
             return 0
         fi
 
-        # For each missing var, prompt for a value if it seems important
-        local additions=""
-        additions+=$'\n'"# ── Added by update to v$(get_new_version) on $(date '+%Y-%m-%d') ──"$'\n'
-
-        for mvar in "${missing_vars[@]}"; do
-            # Get the default/example value from the example file
-            local example_line=""
-            local is_commented=false
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^[[:space:]]*${mvar}= ]]; then
-                    example_line="$line"
-                    break
-                elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*${mvar}= ]]; then
-                    example_line="$line"
-                    is_commented=true
-                    break
-                fi
-            done < "$example_file"
-
-            if $is_commented; then
-                # Commented in example = truly optional, add as-is
-                additions+="${example_line}"$'\n'
-            else
-                # Active in example — prompt for value
-                local default_val=""
-                if [[ "$example_line" =~ =[\"\']?([^\"\']*)[\"\']? ]]; then
-                    default_val="${BASH_REMATCH[1]}"
-                fi
-
-                local user_val
-                user_val=$(prompt_value "${mvar}" "$default_val")
-                if [[ -n "$user_val" ]]; then
-                    additions+="${mvar}=\"${user_val}\""$'\n'
-                else
-                    additions+="# ${mvar}=\"${default_val}\""$'\n'
-                fi
-            fi
-        done
-
-        # Append to config
-        echo "$additions" >> "$config_file"
-        info "Config updated with new parameters"
-
-    else
-        # Non-interactive: append all as comments
+        # For active (uncommented) variables in new sections, prompt for values
         {
             echo ""
             echo "# ── Added by update to v$(get_new_version) on $(date '+%Y-%m-%d') ──"
-            for block in "${new_blocks[@]}"; do
-                # Comment out any active lines (non-interactive = safe default)
+
+            for i in "${missing_sections_idx[@]}"; do
+                local title="${section_titles[$i]}"
+                local body="${section_bodies[$i]}"
+
+                echo ""
+                echo "# ──────────────────────────────────────────────"
+                echo "${title}"
+                echo "# ──────────────────────────────────────────────"
+
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    local var=""
+                    local is_commented=false
+
+                    if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+                        var="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+                        var="${BASH_REMATCH[1]}"
+                        is_commented=true
+                    fi
+
+                    if [[ -n "$var" ]] && ! _var_in_config "$var"; then
+                        if $is_commented; then
+                            # Optional param — keep commented
+                            echo "$line"
+                        else
+                            # Active param — prompt for value
+                            local default_val=""
+                            if [[ "$line" =~ =[\"\']?([^\"\']*)[\"\']? ]]; then
+                                default_val="${BASH_REMATCH[1]}"
+                            fi
+                            local user_val
+                            user_val=$(prompt_value "${var}" "$default_val")
+                            if [[ -n "$user_val" ]]; then
+                                echo "${var}=\"${user_val}\""
+                            else
+                                echo "# ${var}=\"${default_val}\""
+                            fi
+                        fi
+                    elif [[ -n "$var" ]]; then
+                        # Variable already exists in config — skip
+                        :
+                    else
+                        # Comment-only line (description) — include for context
+                        echo "$line"
+                    fi
+                done <<< "$body"
+            done
+        } >> "$config_file"
+        info "Config updated with new sections"
+
+    else
+        # Non-interactive: append entire sections with active vars commented out
+        {
+            echo ""
+            echo "# ── Added by update to v$(get_new_version) on $(date '+%Y-%m-%d') ──"
+            for block in "${section_blocks[@]}"; do
                 echo "$block" | sed 's/^[[:space:]]*\([A-Z_][A-Z0-9_]*=\)/# \1/'
             done
         } >> "$config_file"
-        info "New parameters appended (commented out). Edit ${config_file} to activate them."
+        info "New sections appended (active params commented out). Edit ${config_file} to activate."
     fi
 }
 

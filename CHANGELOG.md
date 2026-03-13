@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 - Config migration now detects commented-out parameters from example config (e.g. `HEALTHCHECK_URL`, `RESTIC_UPLOAD_LIMIT_KB`, `RESTIC_CACHE_DIR`) — previously only active (uncommented) parameters were detected as new
+- Config migration now adds **complete sections** with headers and descriptive comments instead of dumping bare variable lines — matches the structure of the example config file
 
 ## [1.2.0] - 2026-03-13
 
