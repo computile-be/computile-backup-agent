@@ -40,7 +40,12 @@ EOF
     log_debug "Sending email to $to: $subject"
 
     # Send via msmtp
-    if echo "$email_content" | msmtp --read-envelope-from "$to" 2>/dev/null; then
+    local msmtp_args=("--read-envelope-from")
+    if [[ -n "${MSMTP_CONF:-}" ]] && [[ -f "$MSMTP_CONF" ]]; then
+        msmtp_args+=("--file=$MSMTP_CONF")
+    fi
+
+    if echo "$email_content" | msmtp "${msmtp_args[@]}" "$to" 2>/dev/null; then
         log_info "Email notification sent to $to"
         return 0
     else
