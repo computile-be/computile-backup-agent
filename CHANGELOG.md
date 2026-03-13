@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.6] - 2026-03-14
+
+### Changed
+- **Gateway manager: instant overview** — removed `du` calls from overview and client selection menus; uses `df` for total mount usage (instant) and snapshot counts for client list. Size calculation moved to dedicated "Storage breakdown" view with 1-hour caching to avoid repeated slow traversals over SMB.
+
 ## [1.6.5] - 2026-03-14
 
 ### Fixed

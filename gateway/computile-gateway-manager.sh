@@ -99,15 +99,65 @@ list_clients() {
     printf '%s\n' "${clients[@]}"
 }
 
-# Get disk usage for a path (human-readable)
-# Uses --max-depth=0 to avoid deep traversal on SMB mounts
-get_size() {
-    du -sh --max-depth=0 "$1" 2>/dev/null | cut -f1 || echo "N/A"
+# Size cache: avoids repeated expensive du calls over SMB
+# Cache lives in /tmp and is valid for SIZE_CACHE_TTL seconds
+readonly SIZE_CACHE_DIR="/tmp/computile-gateway-cache"
+readonly SIZE_CACHE_TTL=3600  # 1 hour
+
+_init_size_cache() {
+    mkdir -p "$SIZE_CACHE_DIR"
 }
 
-# Get disk usage in bytes for sorting
+# Get cached size or compute it. Use get_size_cached for expensive paths.
+_cache_key() {
+    echo "$1" | md5sum | cut -d' ' -f1
+}
+
+get_size() {
+    local path="$1"
+    _init_size_cache
+    local key
+    key=$(_cache_key "$path")
+    local cache_file="${SIZE_CACHE_DIR}/${key}"
+
+    # Return cached value if fresh enough
+    if [[ -f "$cache_file" ]]; then
+        local cache_age
+        cache_age=$(( $(date +%s) - $(stat -c '%Y' "$cache_file" 2>/dev/null || echo 0) ))
+        if [[ $cache_age -lt $SIZE_CACHE_TTL ]]; then
+            head -1 "$cache_file"
+            return
+        fi
+    fi
+
+    # Compute and cache
+    local size
+    size=$(du -sh --max-depth=0 "$path" 2>/dev/null | cut -f1 || echo "N/A")
+    echo "$size" > "$cache_file"
+    echo "$size"
+}
+
+# Get disk usage in bytes for sorting (also cached)
 get_size_bytes() {
-    du -sb --max-depth=0 "$1" 2>/dev/null | cut -f1 || echo "0"
+    local path="$1"
+    _init_size_cache
+    local key
+    key=$(_cache_key "${path}__bytes")
+    local cache_file="${SIZE_CACHE_DIR}/${key}"
+
+    if [[ -f "$cache_file" ]]; then
+        local cache_age
+        cache_age=$(( $(date +%s) - $(stat -c '%Y' "$cache_file" 2>/dev/null || echo 0) ))
+        if [[ $cache_age -lt $SIZE_CACHE_TTL ]]; then
+            head -1 "$cache_file"
+            return
+        fi
+    fi
+
+    local size
+    size=$(du -sb --max-depth=0 "$path" 2>/dev/null | cut -f1 || echo "0")
+    echo "$size" > "$cache_file"
+    echo "$size"
 }
 
 # Get last modification time — uses restic locks/snapshots dir mtime
@@ -216,8 +266,8 @@ show_overview() {
     local total_size="N/A"
 
     output+="CLIENT OVERVIEW\n"
-    output+="$(printf '%-24s  %-8s  %-6s  %-18s  %s\n' 'CLIENT' 'SIZE' 'SNAPS' 'LAST ACTIVITY' 'STATUS')\n"
-    output+="$(printf '%0.s-' {1..80})\n"
+    output+="$(printf '%-24s  %-6s  %-18s  %s\n' 'CLIENT' 'SNAPS' 'LAST ACTIVITY' 'STATUS')\n"
+    output+="$(printf '%0.s-' {1..70})\n"
 
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
@@ -225,9 +275,6 @@ show_overview() {
 
         local client_dir="${BACKUP_BASE}/${client}"
         local data_dir="${client_dir}/data"
-
-        local size
-        size=$(get_size "$client_dir")
 
         local snaps=0
         local last_activity="never"
@@ -250,21 +297,21 @@ show_overview() {
             ((active_clients++)) || true
         fi
 
-        # Client ID without "backup-" prefix for display
         local display_name="${client#backup-}"
 
-        output+="$(printf '%-24s  %-8s  %-6s  %-18s  %s\n' "$display_name" "$size" "$snaps" "$last_activity" "$status")\n"
+        output+="$(printf '%-24s  %-6s  %-18s  %s\n' "$display_name" "$snaps" "$last_activity" "$status")\n"
     done < <(list_clients)
 
     output+="\n"
 
-    # Summary
-    total_size=$(get_size "$BACKUP_BASE")
+    # Summary — use df for total mount usage (instant, no traversal)
+    local mount_usage
+    mount_usage=$(df -h "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {printf "%s used / %s total (%s)", $3, $2, $5}') || true
     output+="SUMMARY\n"
     output+="  Total clients:  ${total_clients}\n"
     output+="  Active:         ${active_clients}\n"
     output+="  Stale/empty:    ${stale_clients}\n"
-    output+="  Total storage:  ${total_size}\n"
+    output+="  Storage:        ${mount_usage:-N/A}\n"
 
     # Active SFTP sessions
     local sessions
@@ -284,14 +331,17 @@ show_overview() {
 # Per-client detail view
 # ──────────────────────────────────────────────
 show_client_detail() {
-    # Build menu of clients
+    # Build menu of clients (no du — use snapshot count for quick info)
     local clients=()
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
         local display="${client#backup-}"
-        local size
-        size=$(get_size "${BACKUP_BASE}/${client}")
-        clients+=("$display" "${size}")
+        local data_dir="${BACKUP_BASE}/${client}/data"
+        local snaps=0
+        if [[ -d "$data_dir" ]]; then
+            snaps=$(count_snapshots "$data_dir")
+        fi
+        clients+=("$display" "${snaps} snapshots")
     done < <(list_clients)
 
     if [[ ${#clients[@]} -eq 0 ]]; then
@@ -314,7 +364,7 @@ show_client_detail() {
     output+="$(printf '%0.s-' {1..60})\n"
     output+="  User:      ${username}\n"
     output+="  Directory: ${client_dir}\n"
-    output+="  Total size: $(get_size "$client_dir")\n"
+    output+="  Total size: $(get_size "$client_dir") (cached up to 1h)\n"
     output+="  Last activity: $(get_last_activity "$data_dir" 2>/dev/null || echo 'N/A')\n"
 
     # SSH key
@@ -745,14 +795,12 @@ remove_user_interactive() {
         return
     fi
 
-    # Build list of clients for selection
+    # Build list of clients for selection (no du for speed)
     local clients=()
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
         local display="${client#backup-}"
-        local size
-        size=$(get_size "${BACKUP_BASE}/${client}")
-        clients+=("$display" "$size")
+        clients+=("$display" "${BACKUP_BASE}/${client}")
     done < <(list_clients)
 
     if [[ ${#clients[@]} -eq 0 ]]; then
@@ -971,7 +1019,7 @@ main_menu() {
             "client"     "Inspect a specific client" \
             "sessions"   "Active SFTP sessions & locks" \
             "alerts"     "Stale backup alerts" \
-            "storage"    "Storage breakdown" \
+            "storage"    "Storage breakdown (computes sizes)" \
             "health"     "System health (SMB, SSH, fail2ban)" \
             "logs"       "View auth logs" \
             "users"      "User management" \
