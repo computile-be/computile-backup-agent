@@ -18,6 +18,9 @@ readonly RESTIC_VERSION="0.17.3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERACTIVE=true
+UPDATE_MODE=false
+ROLLBACK_MODE=false
+FORCE_MODE=false
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -177,8 +180,16 @@ install_agent() {
     install -m 0644 "${SCRIPT_DIR}/lib/notify.sh"    "$INSTALL_LIB/"
     install -m 0644 "${SCRIPT_DIR}/lib/restic.sh"    "$INSTALL_LIB/"
 
+    # Version file
+    if [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/../VERSION" "$INSTALL_LIB/VERSION"
+    fi
+
     # Main script
     install -m 0755 "${SCRIPT_DIR}/backup-agent.sh" "${INSTALL_BIN}/computile-backup"
+
+    # Record source repo path for future updates
+    echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
 
     info "Agent installed to ${INSTALL_BIN}/computile-backup"
 }
@@ -634,6 +645,290 @@ EOF
 }
 
 # ──────────────────────────────────────────────
+# Version helpers
+# ──────────────────────────────────────────────
+get_new_version() {
+    if [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
+        head -1 "${SCRIPT_DIR}/../VERSION" | tr -d '[:space:]'
+    else
+        echo "unknown"
+    fi
+}
+
+get_installed_version() {
+    if [[ -f "${INSTALL_LIB}/VERSION" ]]; then
+        head -1 "${INSTALL_LIB}/VERSION" | tr -d '[:space:]'
+    else
+        echo "unknown"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Backup current scripts for rollback
+# ──────────────────────────────────────────────
+backup_current_scripts() {
+    local rollback_dir="${INSTALL_LIB}/.rollback"
+
+    if [[ ! -d "$INSTALL_LIB" ]]; then
+        return 0  # Nothing to back up
+    fi
+
+    info "Backing up current scripts for rollback..."
+    rm -rf "$rollback_dir"
+    mkdir -p "$rollback_dir/lib"
+
+    # Back up libraries
+    for f in "$INSTALL_LIB"/*.sh; do
+        [[ -f "$f" ]] && cp "$f" "$rollback_dir/lib/"
+    done
+
+    # Back up VERSION
+    [[ -f "$INSTALL_LIB/VERSION" ]] && cp "$INSTALL_LIB/VERSION" "$rollback_dir/"
+
+    # Back up main script
+    [[ -f "${INSTALL_BIN}/computile-backup" ]] && \
+        cp "${INSTALL_BIN}/computile-backup" "$rollback_dir/"
+
+    # Back up systemd units
+    mkdir -p "$rollback_dir/systemd"
+    for unit in computile-backup.service computile-backup.timer; do
+        [[ -f "${SYSTEMD_DIR}/${unit}" ]] && cp "${SYSTEMD_DIR}/${unit}" "$rollback_dir/systemd/"
+    done
+
+    # Back up logrotate
+    mkdir -p "$rollback_dir/logrotate"
+    [[ -f /etc/logrotate.d/computile-backup ]] && \
+        cp /etc/logrotate.d/computile-backup "$rollback_dir/logrotate/"
+
+    info "Rollback backup saved to $rollback_dir"
+}
+
+# ──────────────────────────────────────────────
+# Update agent (scripts only, no config)
+# ──────────────────────────────────────────────
+update_agent() {
+    local installed_version
+    installed_version=$(get_installed_version)
+    local new_version
+    new_version=$(get_new_version)
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   computile-backup-agent — Update             ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo
+
+    check_root
+
+    # Pre-flight checks
+    if [[ ! -f "${INSTALL_BIN}/computile-backup" ]]; then
+        die "Agent is not installed. Run install.sh without --update for first-time setup."
+    fi
+
+    if [[ ! -f "${CONFIG_DIR}/backup-agent.conf" ]]; then
+        die "No config found at ${CONFIG_DIR}/backup-agent.conf. Run install.sh without --update."
+    fi
+
+    if [[ "$new_version" == "unknown" ]]; then
+        die "Cannot determine new version. Is the VERSION file present in the repo?"
+    fi
+
+    if [[ "$installed_version" == "unknown" ]]; then
+        info "Installed version: pre-release (no VERSION file)"
+        info "Available version: ${new_version}"
+    else
+        info "Installed version: v${installed_version}"
+        info "Available version: v${new_version}"
+
+        if [[ "$installed_version" == "$new_version" ]] && ! $FORCE_MODE; then
+            info "Already up to date (v${installed_version})"
+            return 0
+        fi
+    fi
+
+    # Check no backup is running
+    if [[ -d "/var/run/computile-backup.lock" ]]; then
+        local pid
+        pid=$(cat /var/run/computile-backup.lock/pid 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            die "A backup is currently running (PID $pid). Wait for it to finish or stop it first."
+        fi
+    fi
+
+    # Back up current version
+    backup_current_scripts
+
+    # Update scripts
+    info "Updating agent scripts..."
+    install_agent
+
+    # Update systemd units (with diff)
+    _update_systemd_units
+
+    # Update logrotate
+    install_logrotate
+
+    # Update restic if needed
+    install_restic
+
+    # Verify
+    local verify_version
+    verify_version=$("${INSTALL_BIN}/computile-backup" --version 2>/dev/null | awk '{print $NF}')
+    info "Verified: ${INSTALL_BIN}/computile-backup reports v${verify_version}"
+
+    # Show changelog
+    _show_changelog "$installed_version" "$new_version"
+
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "Update complete: v${installed_version} → v${new_version}"
+    echo
+    echo "Rollback if needed:  sudo ./install.sh --rollback"
+    echo "Test backup:         sudo computile-backup --dry-run --verbose"
+    echo "════════════════════════════════════════════════"
+}
+
+# ──────────────────────────────────────────────
+# Update systemd units with diff
+# ──────────────────────────────────────────────
+_update_systemd_units() {
+    local changed=false
+
+    for unit in computile-backup.service computile-backup.timer; do
+        local src="${SCRIPT_DIR}/systemd/${unit}"
+        local dst="${SYSTEMD_DIR}/${unit}"
+
+        if [[ ! -f "$src" ]]; then continue; fi
+
+        if [[ -f "$dst" ]] && diff -q "$src" "$dst" &>/dev/null; then
+            continue  # No changes
+        fi
+
+        if [[ -f "$dst" ]]; then
+            info "Systemd unit changed: ${unit}"
+            diff --color=auto -u "$dst" "$src" || true
+            echo
+        fi
+
+        install -m 0644 "$src" "$dst"
+        changed=true
+    done
+
+    if $changed; then
+        systemctl daemon-reload
+        info "Systemd units updated and daemon reloaded"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Show changelog between two versions
+# ──────────────────────────────────────────────
+_show_changelog() {
+    local from_version="$1"
+    local to_version="$2"
+    local changelog="${SCRIPT_DIR}/../CHANGELOG.md"
+
+    if [[ ! -f "$changelog" ]]; then
+        return 0
+    fi
+
+    echo
+    info "Changes since v${from_version}:"
+    echo "────────────────────────────────────────────"
+
+    # Extract entries between from_version and to_version
+    # Print everything from the to_version header until the from_version header
+    local printing=false
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^##\ \[.*\] ]]; then
+            if $printing; then
+                # Hit the next version header — stop if it's older than from_version
+                if [[ "$line" == *"[${from_version}]"* ]]; then
+                    break
+                fi
+            fi
+            printing=true
+        fi
+        if $printing; then
+            echo "  $line"
+        fi
+    done < "$changelog"
+
+    echo "────────────────────────────────────────────"
+}
+
+# ──────────────────────────────────────────────
+# Rollback to previous version
+# ──────────────────────────────────────────────
+rollback_agent() {
+    local rollback_dir="${INSTALL_LIB}/.rollback"
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   computile-backup-agent — Rollback           ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo
+
+    check_root
+
+    if [[ ! -d "$rollback_dir" ]]; then
+        die "No rollback data found. Cannot rollback."
+    fi
+
+    local rollback_version="unknown"
+    if [[ -f "$rollback_dir/VERSION" ]]; then
+        rollback_version=$(head -1 "$rollback_dir/VERSION" | tr -d '[:space:]')
+    fi
+
+    local current_version
+    current_version=$(get_installed_version)
+
+    info "Current version:  v${current_version}"
+    info "Rollback target:  v${rollback_version}"
+
+    # Restore libraries
+    if [[ -d "$rollback_dir/lib" ]]; then
+        for f in "$rollback_dir/lib"/*.sh; do
+            [[ -f "$f" ]] && install -m 0644 "$f" "$INSTALL_LIB/"
+        done
+    fi
+
+    # Restore VERSION
+    [[ -f "$rollback_dir/VERSION" ]] && install -m 0644 "$rollback_dir/VERSION" "$INSTALL_LIB/"
+
+    # Restore main script
+    [[ -f "$rollback_dir/computile-backup" ]] && \
+        install -m 0755 "$rollback_dir/computile-backup" "${INSTALL_BIN}/computile-backup"
+
+    # Restore systemd units
+    local systemd_changed=false
+    if [[ -d "$rollback_dir/systemd" ]]; then
+        for f in "$rollback_dir/systemd"/*; do
+            [[ -f "$f" ]] && install -m 0644 "$f" "$SYSTEMD_DIR/" && systemd_changed=true
+        done
+    fi
+
+    if $systemd_changed; then
+        systemctl daemon-reload
+    fi
+
+    # Restore logrotate
+    [[ -f "$rollback_dir/logrotate/computile-backup" ]] && \
+        install -m 0644 "$rollback_dir/logrotate/computile-backup" /etc/logrotate.d/computile-backup
+
+    # Remove rollback data (can only rollback once)
+    rm -rf "$rollback_dir"
+
+    local verify_version
+    verify_version=$("${INSTALL_BIN}/computile-backup" --version 2>/dev/null | awk '{print $NF}')
+
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "Rollback complete: v${current_version} → v${verify_version}"
+    echo
+    echo "Test backup: sudo computile-backup --dry-run --verbose"
+    echo "════════════════════════════════════════════════"
+}
+
+# ──────────────────────────────────────────────
 # Parse CLI arguments
 # ──────────────────────────────────────────────
 parse_args() {
@@ -643,11 +938,26 @@ parse_args() {
                 INTERACTIVE=false
                 shift
                 ;;
+            --update)
+                UPDATE_MODE=true
+                shift
+                ;;
+            --rollback)
+                ROLLBACK_MODE=true
+                shift
+                ;;
+            --force)
+                FORCE_MODE=true
+                shift
+                ;;
             --help|-h)
-                echo "Usage: $0 [--non-interactive]"
+                echo "Usage: $0 [OPTIONS]"
                 echo
                 echo "Options:"
                 echo "  --non-interactive   Skip interactive prompts, use defaults"
+                echo "  --update            Update agent scripts (preserves config)"
+                echo "  --rollback          Rollback to previous version"
+                echo "  --force             Force update even if version matches"
                 echo "  --help, -h          Show this help"
                 exit 0
                 ;;
@@ -664,6 +974,18 @@ parse_args() {
 main() {
     parse_args "$@"
 
+    # Route to the right mode
+    if $ROLLBACK_MODE; then
+        rollback_agent
+        return 0
+    fi
+
+    if $UPDATE_MODE; then
+        update_agent
+        return 0
+    fi
+
+    # Fresh install
     echo "╔══════════════════════════════════════════════╗"
     echo "║   computile-backup-agent — Installer         ║"
     echo "╚══════════════════════════════════════════════╝"
@@ -682,7 +1004,7 @@ main() {
 
     echo
     echo "════════════════════════════════════════════════"
-    echo "Installation complete!"
+    echo "Installation complete! (v$(get_new_version))"
     echo
     echo "Next steps:"
     echo "  1. Review ${CONFIG_DIR}/backup-agent.conf"
@@ -691,6 +1013,8 @@ main() {
     echo "  4. Test: sudo computile-backup --dry-run --verbose"
     echo "  5. Initialize repo: sudo computile-backup --init"
     echo "  6. Enable timer: sudo systemctl enable --now computile-backup.timer"
+    echo
+    echo "To update later: cd /opt/computile-backup-agent && git pull && sudo ./client/install.sh --update"
     echo "════════════════════════════════════════════════"
 }
 

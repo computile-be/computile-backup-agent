@@ -9,7 +9,6 @@
 # ================================================================
 set -euo pipefail
 
-readonly AGENT_VERSION="1.0.0"
 readonly DEFAULT_CONFIG="/etc/computile-backup/backup-agent.conf"
 
 # ──────────────────────────────────────────────
@@ -23,6 +22,15 @@ if [[ -d "/usr/local/lib/computile-backup" ]]; then
     LIB_DIR="/usr/local/lib/computile-backup"
 else
     LIB_DIR="${SCRIPT_DIR}/lib"
+fi
+
+# Read version from VERSION file (installed alongside libs)
+if [[ -f "${LIB_DIR}/VERSION" ]]; then
+    readonly AGENT_VERSION="$(head -1 "${LIB_DIR}/VERSION" | tr -d '[:space:]')"
+elif [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
+    readonly AGENT_VERSION="$(head -1 "${SCRIPT_DIR}/../VERSION" | tr -d '[:space:]')"
+else
+    readonly AGENT_VERSION="unknown"
 fi
 
 for lib in common docker database notify restic; do

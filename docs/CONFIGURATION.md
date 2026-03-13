@@ -56,6 +56,8 @@ Le fichier est un script Bash sourcé par l'agent. Toutes les variables sont des
 | `REDIS_SNAPSHOT_ENABLED` | `"no"` | Snapshots Redis (BGSAVE) |
 | `DUMP_CLEANUP_DAYS` | `3` | Jours avant suppression des vieux dumps |
 
+> **MariaDB 11+** : l'agent détecte automatiquement les binaires `mariadb` / `mariadb-dump` renommés depuis MariaDB 11.
+
 ### Bases de données host (Forge, bare metal)
 
 Pour les serveurs où MySQL/PostgreSQL est installé directement sur le host (Laravel Forge, Ploi, etc.) :
@@ -78,7 +80,7 @@ Pour les serveurs où MySQL/PostgreSQL est installé directement sur le host (La
 Format d'une entrée : `"container_name|db_type|user|password|databases"`
 
 - `container_name` : nom ou ID du container Docker
-- `db_type` : `mysql`, `postgres`, `redis`
+- `db_type` : `mysql` (ou `mariadb`), `postgres` (ou `postgresql`), `redis`
 - `user` : utilisateur DB (vide = auto-détection)
 - `password` : mot de passe (vide = auto-détection depuis env vars)
 - `databases` : liste séparée par virgules (vide = toutes les bases)
@@ -109,7 +111,7 @@ Compatible avec tout service acceptant un ping HTTP GET : [healthchecks.io](http
 | Paramètre | Défaut | Description |
 |-----------|--------|-------------|
 | `RESTIC_UPLOAD_LIMIT_KB` | — | Limite d'upload en KB/s (vide = illimité) |
-| `RESTIC_RETRY_COUNT` | `2` | Nombre de tentatives en cas d'échec SFTP |
+| `RESTIC_RETRY_COUNT` | `2` | Nombre de tentatives en cas d'échec SFTP (backoff : 30s, 60s, 90s…) |
 | `DUMP_MIN_SPACE_MB` | `500` | Espace disque minimum (MB) avant les dumps DB |
 
 ### Vérification

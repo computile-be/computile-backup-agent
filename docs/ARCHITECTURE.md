@@ -20,7 +20,7 @@
 - **Chiffrement** : les données sont chiffrées côté client avant envoi
 - **Snapshots versionnés** : chaque backup est un snapshot immutable
 - **SFTP natif** : transport sécurisé sans composant serveur spécifique
-- **Rétention flexible** : politique configurable (daily/weekly/monthly)
+- **Rétention flexible** : politique configurable (daily/weekly/monthly/yearly)
 
 ### Gateway intermédiaire (et non Synology direct)
 
@@ -64,8 +64,10 @@ Les dumps sont stockés localement puis inclus dans le snapshot restic.
    b. Optionnel : restic check --read-data-subset
 8. ── Phase 5 : Nettoyage ──
    a. Suppression des vieux dumps locaux
-9. Notification email (succès ou échec)
-10. Libération du lock
+9. Rapport (durée, statistiques du snapshot)
+10. Notification email (succès ou échec)
+11. Ping healthcheck (succès ou /fail)
+12. Libération du lock
 ```
 
 ## Structure des fichiers
@@ -90,11 +92,21 @@ Les dumps sont stockés localement puis inclus dans le snapshot restic.
   notify.sh               # Notifications email
   restic.sh               # Opérations restic
 
+/etc/systemd/system/
+  computile-backup.service  # Service oneshot
+  computile-backup.timer    # Timer quotidien (02:15 ± 15min)
+
+/etc/logrotate.d/
+  computile-backup        # Rotation des logs (weekly, 12 rotations)
+
 /var/backups/computile/
   db/
     mysql/                # Dumps MySQL/MariaDB
     postgres/             # Dumps PostgreSQL
     redis/                # Snapshots Redis
+
+/var/run/
+  computile-backup.lock/  # Lock directory (atomic mkdir)
 
 /var/log/
   computile-backup.log    # Log principal

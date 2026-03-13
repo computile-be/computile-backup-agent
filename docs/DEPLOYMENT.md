@@ -87,6 +87,8 @@ Cela crée :
 
 ## 3. Générer les clés SSH (sur le VPS)
 
+> **Note** : l'installeur interactif (`install.sh`) génère automatiquement la clé SSH et configure `/root/.ssh/config`. Cette section est utile si vous configurez la clé manuellement.
+
 Sur le VPS client :
 
 ```bash
@@ -137,17 +139,24 @@ cd computile-backup-agent/client
 sudo ./install.sh
 ```
 
+L'installeur lance un **assistant interactif** qui guide la configuration (identité, repository, chemins, Docker, email, healthcheck, rétention). Il peut aussi être lancé en mode non-interactif avec `--non-interactive` (utilise alors le fichier de config exemple).
+
 Le script installe :
 - restic (binaire officiel)
 - msmtp (pour les notifications email)
 - Le script principal dans `/usr/local/bin/computile-backup`
 - Les librairies dans `/usr/local/lib/computile-backup/`
-- La configuration exemple dans `/etc/computile-backup/`
-- Les unités systemd
+- La configuration dans `/etc/computile-backup/` (générée par l'assistant)
+- Les unités systemd (service + timer)
+- La configuration logrotate (`/etc/logrotate.d/computile-backup`)
+- Génère une clé SSH ed25519 et configure `/root/.ssh/config`
+- Génère un mot de passe restic aléatoire
 
 ---
 
 ## 5. Configurer l'agent
+
+> **Note** : si vous avez utilisé l'installeur interactif, la configuration est déjà générée. Cette section est utile pour les ajustements post-installation ou le mode `--non-interactive`.
 
 ### 5.1 Éditer la configuration principale
 

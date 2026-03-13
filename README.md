@@ -7,7 +7,7 @@ Multi-client backup agent for Linux VPS servers. Uses **restic** for incremental
 - Incremental, deduplicated, encrypted backups with restic
 - Auto-discovery of Docker database containers (MySQL/MariaDB, PostgreSQL, Redis)
 - Logical dumps via `docker exec` (not raw volume copies)
-- Configurable retention policy (daily/weekly/monthly)
+- Configurable retention policy (daily/weekly/monthly/yearly)
 - Email notifications on failure (via msmtp + OVH SMTP)
 - Systemd timer for automated daily backups
 - Works with Coolify, Laravel Forge, hybrid, or bare Linux servers
@@ -34,13 +34,20 @@ sudo bash create_backup_user.sh <client-id> --vps <vps-id>
 ### VPS client setup
 
 ```bash
-git clone https://github.com/computile-be/computile-backup-agent.git
-cd computile-backup-agent/client
+git clone https://github.com/computile/computile-backup-agent.git /opt/computile-backup-agent
+cd /opt/computile-backup-agent/client
 sudo bash install.sh
-sudo nano /etc/computile-backup/backup-agent.conf
 sudo computile-backup --init --verbose
 sudo systemctl enable --now computile-backup.timer
 ```
+
+### Updating an existing installation
+
+```bash
+cd /opt/computile-backup-agent && git pull && sudo bash client/install.sh --update
+```
+
+Rollback if needed: `sudo bash client/install.sh --rollback`
 
 ## Documentation
 

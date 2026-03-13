@@ -1,5 +1,49 @@
 # Opérations
 
+## Mise à jour de l'agent
+
+### Mettre à jour
+
+```bash
+cd /opt/computile-backup-agent && git pull && sudo bash client/install.sh --update
+```
+
+L'update :
+- Vérifie que la version installée est différente de la version du repo
+- Sauvegarde les scripts actuels pour rollback
+- Met à jour les scripts, librairies, units systemd et logrotate
+- Affiche les diffs systemd si des changements sont détectés
+- Vérifie la version installée après la mise à jour
+- Affiche le changelog entre les deux versions
+
+La **configuration** (`/etc/computile-backup/`) n'est **jamais** modifiée par l'update.
+
+### Forcer une mise à jour
+
+```bash
+sudo bash client/install.sh --update --force
+```
+
+Utile si la version est identique mais que vous voulez ré-installer les scripts (ex: après un cherry-pick).
+
+### Rollback
+
+```bash
+sudo bash client/install.sh --rollback
+```
+
+Restaure la version précédente des scripts. Un seul niveau de rollback est conservé (la version juste avant le dernier update).
+
+### Vérifier la version installée
+
+```bash
+computile-backup --version
+```
+
+La version est aussi logguée à chaque exécution et taguée dans les snapshots restic (`agent:vX.Y.Z`).
+
+---
+
 ## Lancer un backup manuellement
 
 ```bash
@@ -75,7 +119,7 @@ restic ls latest /var/www
 restic check
 
 # Vérification complète (lecture d'un sous-ensemble de données)
-restic check --read-data-subset=5%
+restic check --read-data-subset=1%
 
 # Vérification complète (toutes les données — lent)
 restic check --read-data
@@ -117,7 +161,8 @@ restic forget --prune \
 restic forget --dry-run \
     --keep-daily 7 \
     --keep-weekly 4 \
-    --keep-monthly 6
+    --keep-monthly 6 \
+    --keep-yearly 2
 ```
 
 ## Gérer le timer systemd
@@ -166,6 +211,47 @@ ssh backup-gateway
 # Vérifier Tailscale
 tailscale status
 tailscale ping <gateway-ip>
+```
+
+## Logrotate
+
+Les logs sont rotés automatiquement via logrotate :
+
+- **Fréquence** : hebdomadaire
+- **Rétention** : 12 rotations (≈ 3 mois)
+- **Compression** : gzip (avec `delaycompress`)
+- **Config** : `/etc/logrotate.d/computile-backup`
+
+```bash
+# Tester la rotation (simulation)
+sudo logrotate -d /etc/logrotate.d/computile-backup
+
+# Forcer une rotation
+sudo logrotate -f /etc/logrotate.d/computile-backup
+```
+
+## Healthcheck
+
+Si `HEALTHCHECK_URL` est configuré, l'agent envoie un ping HTTP GET à chaque exécution :
+
+- **Succès** : ping vers `HEALTHCHECK_URL`
+- **Échec** : ping vers `HEALTHCHECK_URL/fail`
+
+Compatible avec [healthchecks.io](https://healthchecks.io), [Uptime Kuma](https://github.com/louislam/uptime-kuma), ou tout service acceptant un ping HTTP GET.
+
+## Déverrouiller un backup bloqué
+
+L'agent utilise un lock (`/var/run/computile-backup.lock/`) pour empêcher les exécutions simultanées. En cas de crash, le lock périmé est détecté automatiquement (vérification du PID).
+
+Si le lock bloque malgré tout :
+
+```bash
+# Vérifier si un backup tourne réellement
+cat /var/run/computile-backup.lock/pid
+ps aux | grep computile-backup
+
+# Supprimer le lock manuellement (si aucun backup n'est en cours)
+sudo rm -rf /var/run/computile-backup.lock
 ```
 
 ## Interpréter les codes de sortie

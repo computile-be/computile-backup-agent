@@ -88,6 +88,7 @@ restic_backup() {
     tags+=("--tag" "host:${HOST_ID}")
     tags+=("--tag" "env:${ENVIRONMENT:-prod}")
     tags+=("--tag" "role:${ROLE:-server}")
+    tags+=("--tag" "agent:v${AGENT_VERSION:-unknown}")
 
     # Build exclude options
     local exclude_opts=()
