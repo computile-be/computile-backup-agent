@@ -4,6 +4,13 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.1] - 2026-03-14
+
+### Added
+- **Self-update from TUI**: new "Update gateway" menu item runs `git pull` + `setup_gateway.sh --update` without leaving the manager — shows changelog, then re-execs the new version
+- **Remove SSH key**: select a client, see all keys with fingerprint and comment, remove one — completes the key management workflow alongside add/view
+- **SMB auto-remount**: when system health detects the backup mount is down, offers to remount it immediately instead of just displaying "NOT MOUNTED"
+
 ## [1.8.0] - 2026-03-14
 
 ### Added

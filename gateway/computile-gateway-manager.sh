@@ -642,6 +642,27 @@ show_system_health() {
     output+="  $(uptime 2>/dev/null || echo 'N/A')\n"
 
     msg_scroll "System Health" "$(echo -e "$output")"
+
+    # Offer to remount SMB if not mounted
+    if ! mountpoint -q "$BACKUP_BASE" 2>/dev/null && [[ -d "$BACKUP_BASE" ]]; then
+        if yesno "SMB Not Mounted" "The backup storage at ${BACKUP_BASE} is not mounted.\n\nAttempt to mount it now?"; then
+            _remount_smb
+        fi
+    fi
+}
+
+_remount_smb() {
+    local mount_output
+    mount_output=$(mount "$BACKUP_BASE" 2>&1)
+    local rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        local disk_info
+        disk_info=$(df -h "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {printf "%s used / %s total (%s available)", $3, $2, $4}') || true
+        msg_box "SMB Mount" "Successfully mounted ${BACKUP_BASE}\n\n${disk_info}"
+    else
+        msg_box "SMB Mount Failed" "Could not mount ${BACKUP_BASE}:\n\n${mount_output}\n\nCheck /etc/fstab and SMB credentials."
+    fi
 }
 
 # ──────────────────────────────────────────────
@@ -781,21 +802,23 @@ manage_users() {
         local choice
         choice=$($DIALOG --title "User Management" \
             --menu "Manage backup users:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
-            "list"    "List all backup users" \
-            "create"  "Create new backup user" \
-            "remove"  "Remove backup user" \
-            "keys"    "View SSH keys for a user" \
-            "addkey"  "Add SSH key to a user" \
-            "back"    "Back to main menu" \
+            "list"      "List all backup users" \
+            "create"    "Create new backup user" \
+            "remove"    "Remove backup user" \
+            "keys"      "View SSH keys for a user" \
+            "addkey"    "Add SSH key to a user" \
+            "removekey" "Remove SSH key from a user" \
+            "back"      "Back to main menu" \
             3>&1 1>&2 2>&3) || break
 
         case "$choice" in
-            list)   show_user_list ;;
-            create) create_user_interactive ;;
-            remove) remove_user_interactive ;;
-            keys)   show_user_keys ;;
-            addkey) add_user_key ;;
-            back|"") break ;;
+            list)      show_user_list ;;
+            create)    create_user_interactive ;;
+            remove)    remove_user_interactive ;;
+            keys)      show_user_keys ;;
+            addkey)    add_user_key ;;
+            removekey) remove_user_key ;;
+            back|"")   break ;;
         esac
     done
 }
@@ -1053,6 +1076,92 @@ add_user_key() {
     # Add the key
     echo "$pubkey" >> "$auth_keys"
     msg_box "Add SSH Key" "Key added successfully for ${username}.\n\nFingerprint: $(echo "$pubkey" | ssh-keygen -lf /dev/stdin 2>/dev/null || echo 'N/A')"
+}
+
+remove_user_key() {
+    # Select client
+    local clients=()
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        local auth_keys="${BACKUP_BASE}/${client}/.ssh/authorized_keys"
+        local key_count=0
+        if [[ -f "$auth_keys" ]]; then
+            key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo "0")
+        fi
+        if [[ $key_count -gt 0 ]]; then
+            clients+=("$display" "${key_count} key(s)")
+        fi
+    done < <(list_clients)
+
+    if [[ ${#clients[@]} -eq 0 ]]; then
+        msg_box "Remove SSH Key" "No clients with SSH keys found."
+        return
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Remove SSH Key" \
+        --menu "Select client:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${clients[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    local username="backup-${choice}"
+    local auth_keys="${BACKUP_BASE}/${username}/.ssh/authorized_keys"
+
+    if [[ ! -f "$auth_keys" ]]; then
+        msg_box "Remove SSH Key" "No authorized_keys file for ${username}."
+        return
+    fi
+
+    # Build menu of keys with fingerprint and comment
+    local keys=()
+    local key_lines=()
+    local idx=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" == \#* ]] && continue
+        [[ ! "$line" =~ ^(ssh-|ecdsa-) ]] && continue
+        ((idx++)) || true
+        local key_type
+        key_type=$(echo "$line" | awk '{print $1}')
+        local key_comment
+        key_comment=$(echo "$line" | awk '{print $NF}')
+        local key_hash
+        key_hash=$(echo "$line" | ssh-keygen -lf /dev/stdin 2>/dev/null | awk '{print $2}') || key_hash="N/A"
+        keys+=("${idx}" "${key_type} ${key_hash} (${key_comment})")
+        key_lines+=("$line")
+    done < "$auth_keys"
+
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        msg_box "Remove SSH Key" "No SSH keys found for ${username}."
+        return
+    fi
+
+    local key_choice
+    key_choice=$($DIALOG --title "Remove SSH Key — ${username}" \
+        --menu "Select key to remove:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${keys[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    # key_choice is 1-based index
+    local key_idx=$(( key_choice - 1 ))
+    local selected_key="${key_lines[$key_idx]}"
+    local selected_info="${keys[$(( key_choice * 2 - 1 ))]}"
+
+    if ! yesno "Confirm Removal" "Remove this key from ${username}?\n\n${selected_info}"; then
+        return
+    fi
+
+    # Remove the key line from authorized_keys
+    local tmpfile
+    tmpfile=$(mktemp)
+    grep -vF "$selected_key" "$auth_keys" > "$tmpfile" 2>/dev/null || true
+    cp "$tmpfile" "$auth_keys"
+    rm -f "$tmpfile"
+    chmod 600 "$auth_keys"
+    chown "${username}:backupusers" "$auth_keys"
+
+    msg_box "Remove SSH Key" "Key removed successfully from ${username}."
 }
 
 # ──────────────────────────────────────────────
@@ -1465,6 +1574,110 @@ _clear_size_cache() {
 }
 
 # ──────────────────────────────────────────────
+# Self-update
+# ──────────────────────────────────────────────
+self_update() {
+    # Find the source repo
+    local source_repo=""
+    if [[ -f /usr/local/lib/computile-gateway/.source-repo ]]; then
+        source_repo=$(cat /usr/local/lib/computile-gateway/.source-repo 2>/dev/null | head -1)
+    fi
+    if [[ -z "$source_repo" ]] || [[ ! -d "$source_repo" ]]; then
+        source_repo="/opt/computile-backup-agent"
+    fi
+
+    if [[ ! -d "$source_repo/.git" ]]; then
+        msg_box "Update" "Cannot find source repository.\n\nExpected at: ${source_repo}\n\nClone the repo first:\n  git clone https://github.com/computile-be/computile-backup-agent.git ${source_repo}"
+        return
+    fi
+
+    local installed_version
+    installed_version=$(cat /usr/local/lib/computile-gateway/VERSION 2>/dev/null || echo "unknown")
+
+    # Check for updates
+    clear
+    echo "================================================"
+    echo "  Checking for updates..."
+    echo "================================================"
+    echo
+    echo "Source repo: ${source_repo}"
+    echo "Installed:   v${installed_version}"
+    echo
+
+    cd "$source_repo" || {
+        msg_box "Update" "Cannot access source repo: ${source_repo}"
+        return
+    }
+
+    # Fetch latest
+    echo "Fetching latest changes..."
+    if ! git fetch origin 2>&1; then
+        echo
+        echo "[ERROR] git fetch failed. Check network connectivity."
+        echo "Press Enter to continue."
+        read -r
+        return
+    fi
+
+    # Check if there are updates
+    local local_head
+    local_head=$(git rev-parse HEAD 2>/dev/null)
+    local remote_head
+    remote_head=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null) || true
+
+    if [[ "$local_head" == "$remote_head" ]]; then
+        local new_version
+        new_version=$(head -1 VERSION 2>/dev/null || echo "unknown")
+        echo
+        echo "Already up to date (v${new_version})."
+        echo "Press Enter to continue."
+        read -r
+        return
+    fi
+
+    # Show what changed
+    echo
+    echo "Changes available:"
+    git log --oneline "${local_head}..${remote_head}" 2>/dev/null | head -20
+    echo
+
+    echo "Pulling changes..."
+    if ! git pull origin master 2>&1 && ! git pull origin main 2>&1; then
+        echo
+        echo "[ERROR] git pull failed."
+        echo "Press Enter to continue."
+        read -r
+        return
+    fi
+
+    local new_version
+    new_version=$(head -1 VERSION 2>/dev/null || echo "unknown")
+    echo
+    echo "Repo updated: v${installed_version} -> v${new_version}"
+    echo
+
+    # Run the update script
+    echo "Running setup_gateway.sh --update..."
+    echo
+    if bash gateway/setup_gateway.sh --update --force; then
+        echo
+        echo "================================================"
+        echo "  Update complete: v${installed_version} -> v${new_version}"
+        echo "  The manager will restart with the new version."
+        echo "================================================"
+    else
+        echo
+        echo "[WARN] Update script returned an error. Check output above."
+    fi
+    echo
+    echo "Press Enter to continue."
+    read -r
+
+    # Re-exec the new version of the manager
+    exec computile-gateway-manager
+}
+
+# ──────────────────────────────────────────────
 # Report export (non-interactive)
 # ──────────────────────────────────────────────
 generate_report() {
@@ -1800,6 +2013,7 @@ main_menu() {
             "fail2ban"   "Fail2ban: view/unban IPs" \
             "logs"       "View auth logs" \
             "users"      "User management" \
+            "update"     "Update gateway (git pull + install)" \
             "quit"       "Quit" \
             3>&1 1>&2 2>&3) || break
 
@@ -1817,6 +2031,7 @@ main_menu() {
             fail2ban)   manage_fail2ban ;;
             logs)       show_auth_logs ;;
             users)      manage_users ;;
+            update)     self_update ;;
             quit|"")    break ;;
         esac
     done
@@ -1868,7 +2083,7 @@ Interactive features:
   - System health: SMB mount, SSH, fail2ban, Tailscale
   - Tailscale peers overview (online/offline status)
   - Fail2ban management: view, unban IP, unban all
-  - User management: create, remove, view/add SSH keys
+  - User management: create, remove, view/add/remove SSH keys
   - Auth log viewer
 
 Non-interactive modes:
