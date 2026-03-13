@@ -13,6 +13,33 @@ set -euo pipefail
 readonly BACKUP_BASE="/srv/backups"
 readonly STALE_THRESHOLD_DAYS=2  # Alert if no backup activity in N days
 
+# ──────────────────────────────────────────────
+# Check dependencies
+# ──────────────────────────────────────────────
+check_dependencies() {
+    local missing=()
+    for cmd in tput du find stat date awk; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if ! command -v whiptail &>/dev/null && ! command -v dialog &>/dev/null; then
+        missing+=("whiptail (or dialog)")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "[ERROR] Missing required commands: ${missing[*]}" >&2
+        echo "  Install them with: apt-get install ncurses-bin coreutils whiptail" >&2
+        exit 1
+    fi
+}
+
+check_dependencies
+
+# Ensure TERM is set (LXC containers may not have it)
+export TERM="${TERM:-linux}"
+
 # Terminal dimensions
 TERM_LINES=$(tput lines 2>/dev/null || echo 24)
 TERM_COLS=$(tput cols 2>/dev/null || echo 80)
@@ -32,10 +59,6 @@ if command -v whiptail &>/dev/null; then
     DIALOG="whiptail"
 elif command -v dialog &>/dev/null; then
     DIALOG="dialog"
-else
-    echo "[ERROR] Neither whiptail nor dialog found. Install one:" >&2
-    echo "  apt-get install whiptail" >&2
-    exit 1
 fi
 
 # ──────────────────────────────────────────────

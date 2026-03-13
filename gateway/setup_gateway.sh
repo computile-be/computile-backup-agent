@@ -93,6 +93,7 @@ install_packages() {
         rsync \
         tree \
         whiptail \
+        ncurses-bin \
         > /dev/null
 
     info "Packages installed"

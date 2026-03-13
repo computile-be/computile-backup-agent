@@ -4,6 +4,13 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.2] - 2026-03-14
+
+### Fixed
+- Gateway manager now checks all dependencies on startup and reports missing packages clearly (instead of silent exit)
+- Set `TERM=linux` fallback for LXC containers where `$TERM` is unset
+- Added `ncurses-bin` to gateway package list (provides `tput`, missing on minimal LXC)
+
 ## [1.6.1] - 2026-03-14
 
 ### Fixed
