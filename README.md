@@ -74,10 +74,10 @@ Multi-client backup agent for Linux VPS servers. Uses **restic** for incremental
 ### Gateway setup
 
 ```bash
-git clone https://github.com/computile-be/computile-backup-agent.git
-cd computile-backup-agent/gateway
+git clone https://github.com/computile-be/computile-backup-agent.git /opt/computile-backup-agent
+cd /opt/computile-backup-agent/gateway
 sudo bash setup_gateway.sh
-sudo bash create_backup_user.sh <client-id> --vps <vps-id>
+sudo computile-create-backup-user <client-id> --vps <vps-id>
 ```
 
 ### VPS client setup
@@ -95,11 +95,19 @@ sudo computile-manager
 
 ### Updating an existing installation
 
+**Client (VPS):**
 ```bash
 cd /opt/computile-backup-agent && git pull && sudo bash client/install.sh --update
 ```
 
 Rollback if needed: `sudo bash client/install.sh --rollback`
+
+**Gateway:**
+```bash
+cd /opt/computile-backup-agent && git pull && sudo bash gateway/setup_gateway.sh --update
+```
+
+Rollback if needed: `sudo bash gateway/setup_gateway.sh --rollback`
 
 ### Command-line usage
 

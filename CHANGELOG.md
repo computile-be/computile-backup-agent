@@ -4,6 +4,15 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.0] - 2026-03-14
+
+### Added
+- **Gateway update mechanism**: `setup_gateway.sh --update` updates gateway scripts without touching system config (SMB, SSH, fail2ban)
+- **Gateway rollback**: `setup_gateway.sh --rollback` reverts to the previous version
+- Gateway scripts (`create_backup_user`, `remove_backup_user`) are now installed to `/usr/local/bin/` as `computile-create-backup-user` and `computile-remove-backup-user`
+- Gateway version tracked in `/usr/local/lib/computile-gateway/VERSION`
+- Gateway manager now finds user management scripts in `/usr/local/bin/` (installed) or repo directory (fallback)
+
 ## [1.5.1] - 2026-03-14
 
 ### Added

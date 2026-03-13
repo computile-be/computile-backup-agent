@@ -8,11 +8,15 @@
 #   - Creates backup storage structure
 #   - Hardens SSH
 #   - Installs fail2ban
+#   - Installs gateway scripts (manager, user management)
 #
 # Must be run as root on the gateway VM.
 # Tested on: Ubuntu 24.04, Debian 12/13
 #
-# Usage: sudo ./setup_gateway.sh
+# Usage:
+#   sudo ./setup_gateway.sh              # First-time setup
+#   sudo ./setup_gateway.sh --update     # Update scripts only
+#   sudo ./setup_gateway.sh --rollback   # Revert to previous version
 # ================================================================
 set -euo pipefail
 
@@ -20,6 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 readonly BACKUP_BASE="/srv/backups"
 readonly SMB_CREDENTIALS="/root/.smb-credentials"
+readonly INSTALL_BIN="/usr/local/bin"
+readonly INSTALL_LIB="/usr/local/lib/computile-gateway"
+
+UPDATE_MODE=false
+ROLLBACK_MODE=false
+FORCE_MODE=false
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -50,6 +60,25 @@ prompt_value() {
 }
 
 # ──────────────────────────────────────────────
+# Version helpers
+# ──────────────────────────────────────────────
+get_new_version() {
+    if [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
+        head -1 "${SCRIPT_DIR}/../VERSION" | tr -d '[:space:]'
+    else
+        echo "unknown"
+    fi
+}
+
+get_installed_version() {
+    if [[ -f "${INSTALL_LIB}/VERSION" ]]; then
+        head -1 "${INSTALL_LIB}/VERSION" | tr -d '[:space:]'
+    else
+        echo "unknown"
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Install packages
 # ──────────────────────────────────────────────
 install_packages() {
@@ -63,6 +92,7 @@ install_packages() {
         fail2ban \
         rsync \
         tree \
+        whiptail \
         > /dev/null
 
     info "Packages installed"
@@ -189,19 +219,42 @@ EOF
 }
 
 # ──────────────────────────────────────────────
-# Install gateway manager
+# Install gateway scripts
 # ──────────────────────────────────────────────
-install_gateway_manager() {
-    info "Installing gateway manager..."
-    local manager_src="${SCRIPT_DIR}/computile-gateway-manager.sh"
-    local manager_dest="/usr/local/bin/computile-gateway-manager"
+install_gateway_scripts() {
+    info "Installing gateway scripts..."
 
-    if [[ -f "$manager_src" ]]; then
-        install -m 0755 "$manager_src" "$manager_dest"
-        info "Gateway manager installed: $manager_dest"
+    mkdir -p "$INSTALL_LIB"
+
+    # Gateway manager
+    if [[ -f "${SCRIPT_DIR}/computile-gateway-manager.sh" ]]; then
+        install -m 0755 "${SCRIPT_DIR}/computile-gateway-manager.sh" \
+            "${INSTALL_BIN}/computile-gateway-manager"
+        info "Gateway manager installed: ${INSTALL_BIN}/computile-gateway-manager"
     else
-        warn "Gateway manager script not found: $manager_src"
+        warn "Gateway manager script not found"
     fi
+
+    # User management scripts
+    if [[ -f "${SCRIPT_DIR}/create_backup_user.sh" ]]; then
+        install -m 0755 "${SCRIPT_DIR}/create_backup_user.sh" \
+            "${INSTALL_BIN}/computile-create-backup-user"
+        info "Create user script installed: ${INSTALL_BIN}/computile-create-backup-user"
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/remove_backup_user.sh" ]]; then
+        install -m 0755 "${SCRIPT_DIR}/remove_backup_user.sh" \
+            "${INSTALL_BIN}/computile-remove-backup-user"
+        info "Remove user script installed: ${INSTALL_BIN}/computile-remove-backup-user"
+    fi
+
+    # Version file
+    if [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/../VERSION" "${INSTALL_LIB}/VERSION"
+    fi
+
+    # Record source repo path for future updates
+    echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
 }
 
 # ──────────────────────────────────────────────
@@ -215,9 +268,229 @@ setup_directories() {
 }
 
 # ──────────────────────────────────────────────
+# Backup current scripts for rollback
+# ──────────────────────────────────────────────
+backup_current_scripts() {
+    local rollback_dir="${INSTALL_LIB}/.rollback"
+
+    if [[ ! -d "$INSTALL_LIB" ]]; then
+        return 0
+    fi
+
+    info "Backing up current scripts for rollback..."
+    rm -rf "$rollback_dir"
+    mkdir -p "$rollback_dir"
+
+    # Back up VERSION
+    [[ -f "${INSTALL_LIB}/VERSION" ]] && cp "${INSTALL_LIB}/VERSION" "$rollback_dir/"
+
+    # Back up installed scripts
+    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user; do
+        [[ -f "${INSTALL_BIN}/${script}" ]] && cp "${INSTALL_BIN}/${script}" "$rollback_dir/"
+    done
+
+    info "Rollback backup saved to $rollback_dir"
+}
+
+# ──────────────────────────────────────────────
+# Show changelog between two versions
+# ──────────────────────────────────────────────
+show_changelog() {
+    local from_version="$1"
+    local to_version="$2"
+    local changelog="${SCRIPT_DIR}/../CHANGELOG.md"
+
+    if [[ ! -f "$changelog" ]]; then
+        return 0
+    fi
+
+    echo
+    info "Changes since v${from_version}:"
+    echo "────────────────────────────────────────────"
+
+    local printing=false
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^##\ \[.*\] ]]; then
+            if $printing; then
+                if [[ "$line" == *"[${from_version}]"* ]]; then
+                    break
+                fi
+            fi
+            printing=true
+        fi
+        if $printing; then
+            echo "  $line"
+        fi
+    done < "$changelog"
+
+    echo "────────────────────────────────────────────"
+}
+
+# ──────────────────────────────────────────────
+# Update gateway (scripts only)
+# ──────────────────────────────────────────────
+update_gateway() {
+    local installed_version
+    installed_version=$(get_installed_version)
+    local new_version
+    new_version=$(get_new_version)
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   computile-backup — Gateway Update          ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo
+
+    check_root
+
+    # Pre-flight checks
+    if [[ ! -f "${INSTALL_BIN}/computile-gateway-manager" ]]; then
+        die "Gateway is not installed. Run setup_gateway.sh without --update for first-time setup."
+    fi
+
+    if [[ "$new_version" == "unknown" ]]; then
+        die "Cannot determine new version. Is the VERSION file present in the repo?"
+    fi
+
+    if [[ "$installed_version" == "unknown" ]]; then
+        info "Installed version: pre-release (no VERSION file)"
+        info "Available version: v${new_version}"
+    else
+        info "Installed version: v${installed_version}"
+        info "Available version: v${new_version}"
+
+        if [[ "$installed_version" == "$new_version" ]] && ! $FORCE_MODE; then
+            info "Already up to date (v${installed_version})"
+            return 0
+        fi
+    fi
+
+    # Back up current version
+    backup_current_scripts
+
+    # Update scripts
+    install_gateway_scripts
+
+    # Verify
+    if [[ -f "${INSTALL_LIB}/VERSION" ]]; then
+        local verify_version
+        verify_version=$(head -1 "${INSTALL_LIB}/VERSION" | tr -d '[:space:]')
+        info "Verified: v${verify_version} installed"
+    fi
+
+    # Show changelog
+    show_changelog "$installed_version" "$new_version"
+
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "Gateway update complete: v${installed_version} → v${new_version}"
+    echo
+    echo "Rollback if needed: sudo ./setup_gateway.sh --rollback"
+    echo "════════════════════════════════════════════════"
+}
+
+# ──────────────────────────────────────────────
+# Rollback to previous version
+# ──────────────────────────────────────────────
+rollback_gateway() {
+    local rollback_dir="${INSTALL_LIB}/.rollback"
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   computile-backup — Gateway Rollback        ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo
+
+    check_root
+
+    if [[ ! -d "$rollback_dir" ]]; then
+        die "No rollback data found. Cannot rollback."
+    fi
+
+    local rollback_version="unknown"
+    if [[ -f "$rollback_dir/VERSION" ]]; then
+        rollback_version=$(head -1 "$rollback_dir/VERSION" | tr -d '[:space:]')
+    fi
+
+    local current_version
+    current_version=$(get_installed_version)
+
+    info "Current version:  v${current_version}"
+    info "Rollback target:  v${rollback_version}"
+
+    # Restore scripts
+    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user; do
+        if [[ -f "$rollback_dir/${script}" ]]; then
+            install -m 0755 "$rollback_dir/${script}" "${INSTALL_BIN}/${script}"
+        fi
+    done
+
+    # Restore VERSION
+    [[ -f "$rollback_dir/VERSION" ]] && install -m 0644 "$rollback_dir/VERSION" "${INSTALL_LIB}/"
+
+    # Remove rollback data (can only rollback once)
+    rm -rf "$rollback_dir"
+
+    local verify_version
+    verify_version=$(get_installed_version)
+
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "Rollback complete: v${current_version} → v${verify_version}"
+    echo "════════════════════════════════════════════════"
+}
+
+# ──────────────────────────────────────────────
+# Parse CLI arguments
+# ──────────────────────────────────────────────
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --update)
+                UPDATE_MODE=true
+                shift
+                ;;
+            --rollback)
+                ROLLBACK_MODE=true
+                shift
+                ;;
+            --force)
+                FORCE_MODE=true
+                shift
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS]"
+                echo
+                echo "Options:"
+                echo "  --update     Update gateway scripts (preserves config)"
+                echo "  --rollback   Rollback to previous version"
+                echo "  --force      Force update even if version matches"
+                echo "  --help, -h   Show this help"
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
+    done
+}
+
+# ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
 main() {
+    parse_args "$@"
+
+    # Route to the right mode
+    if $ROLLBACK_MODE; then
+        rollback_gateway
+        return 0
+    fi
+
+    if $UPDATE_MODE; then
+        update_gateway
+        return 0
+    fi
+
+    # Fresh install
     echo "╔══════════════════════════════════════════════╗"
     echo "║   computile-backup — Gateway Setup           ║"
     echo "╚══════════════════════════════════════════════╝"
@@ -230,18 +503,20 @@ main() {
     setup_smb_mount
     setup_ssh
     setup_fail2ban
-    install_gateway_manager
+    install_gateway_scripts
 
     echo
     echo "════════════════════════════════════════════════"
-    echo "Gateway setup complete!"
+    echo "Gateway setup complete! (v$(get_new_version))"
     echo
     echo "Next steps:"
-    echo "  1. Create backup users:  ./create_backup_user.sh <client-id>"
+    echo "  1. Create backup users:  computile-create-backup-user <client-id>"
     echo "  2. Add SSH public keys for each VPS"
     echo "  3. Verify SMB mount:     df -h $BACKUP_BASE"
     echo "  4. Test SFTP access from a VPS"
     echo "  5. Launch the gateway manager: computile-gateway-manager"
+    echo
+    echo "To update later: cd /opt/computile-backup-agent && git pull && sudo ./gateway/setup_gateway.sh --update"
     echo "════════════════════════════════════════════════"
 }
 

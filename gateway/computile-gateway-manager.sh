@@ -626,17 +626,20 @@ show_user_list() {
 }
 
 create_user_interactive() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local create_script="${script_dir}/create_backup_user.sh"
-
-    if [[ ! -f "$create_script" ]]; then
-        # Try installed location
-        create_script="/opt/computile-backup-agent/gateway/create_backup_user.sh"
+    local create_script=""
+    if command -v computile-create-backup-user &>/dev/null; then
+        create_script="computile-create-backup-user"
+    else
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        create_script="${script_dir}/create_backup_user.sh"
+        if [[ ! -f "$create_script" ]]; then
+            create_script="/opt/computile-backup-agent/gateway/create_backup_user.sh"
+        fi
     fi
 
-    if [[ ! -f "$create_script" ]]; then
-        msg_box "Error" "Cannot find create_backup_user.sh"
+    if [[ ! -f "$create_script" ]] && ! command -v "$create_script" &>/dev/null; then
+        msg_box "Error" "Cannot find create_backup_user script"
         return
     fi
 
@@ -667,16 +670,20 @@ create_user_interactive() {
 }
 
 remove_user_interactive() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local remove_script="${script_dir}/remove_backup_user.sh"
-
-    if [[ ! -f "$remove_script" ]]; then
-        remove_script="/opt/computile-backup-agent/gateway/remove_backup_user.sh"
+    local remove_script=""
+    if command -v computile-remove-backup-user &>/dev/null; then
+        remove_script="computile-remove-backup-user"
+    else
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        remove_script="${script_dir}/remove_backup_user.sh"
+        if [[ ! -f "$remove_script" ]]; then
+            remove_script="/opt/computile-backup-agent/gateway/remove_backup_user.sh"
+        fi
     fi
 
-    if [[ ! -f "$remove_script" ]]; then
-        msg_box "Error" "Cannot find remove_backup_user.sh"
+    if [[ ! -f "$remove_script" ]] && ! command -v "$remove_script" &>/dev/null; then
+        msg_box "Error" "Cannot find remove_backup_user script"
         return
     fi
 

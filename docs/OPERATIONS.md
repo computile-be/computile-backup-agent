@@ -25,7 +25,7 @@ Nécessite `whiptail` (pré-installé sur Debian/Ubuntu) ou `dialog`.
 
 ---
 
-## Mise à jour de l'agent
+## Mise à jour de l'agent (client VPS)
 
 ### Mettre à jour
 
@@ -63,6 +63,34 @@ Restaure la version précédente des scripts. Un seul niveau de rollback est con
 
 ```bash
 computile-backup --version
+```
+
+## Mise à jour de la gateway
+
+### Mettre à jour
+
+```bash
+cd /opt/computile-backup-agent && git pull && sudo bash gateway/setup_gateway.sh --update
+```
+
+L'update met à jour les scripts uniquement (gateway manager, user management). La configuration système (SMB, SSH, fail2ban) n'est pas touchée.
+
+### Forcer une mise à jour
+
+```bash
+sudo bash gateway/setup_gateway.sh --update --force
+```
+
+### Rollback
+
+```bash
+sudo bash gateway/setup_gateway.sh --rollback
+```
+
+### Vérifier la version installée
+
+```bash
+cat /usr/local/lib/computile-gateway/VERSION
 ```
 
 La version est aussi logguée à chaque exécution et taguée dans les snapshots restic (`agent:vX.Y.Z`).
