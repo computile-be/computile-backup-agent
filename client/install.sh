@@ -49,18 +49,18 @@ install_restic() {
     arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     local url="https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${arch}.bz2"
 
-    local tmp_file
-    tmp_file=$(mktemp)
-    trap "rm -f $tmp_file ${tmp_file%.bz2}" RETURN
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local tmp_bz2="${tmp_dir}/restic.bz2"
+    trap "rm -rf $tmp_dir" RETURN
 
-    if ! wget -q -O "$tmp_file" "$url"; then
+    if ! wget -q -O "$tmp_bz2" "$url"; then
         die "Failed to download restic from $url"
     fi
 
-    bunzip2 -f "$tmp_file"
-    local bin_file="${tmp_file%.bz2}"
+    bunzip2 -f "$tmp_bz2"
 
-    install -m 0755 "$bin_file" "${INSTALL_BIN}/restic"
+    install -m 0755 "${tmp_dir}/restic" "${INSTALL_BIN}/restic"
     info "Restic installed: $(restic version)"
 }
 
