@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.4] - 2026-03-14
+
+### Fixed
+- **Gateway manager performance on SMB mounts**: replaced expensive recursive `find` and deep `du` with `stat` on restic directory mtimes and `ls` for snapshot counting — overview loads in seconds instead of minutes on network-mounted storage
+
 ## [1.6.3] - 2026-03-14
 
 ### Fixed

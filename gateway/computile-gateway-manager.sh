@@ -100,22 +100,40 @@ list_clients() {
 }
 
 # Get disk usage for a path (human-readable)
+# Uses --max-depth=0 to avoid deep traversal on SMB mounts
 get_size() {
-    du -sh "$1" 2>/dev/null | cut -f1 || echo "N/A"
+    du -sh --max-depth=0 "$1" 2>/dev/null | cut -f1 || echo "N/A"
 }
 
 # Get disk usage in bytes for sorting
 get_size_bytes() {
-    du -sb "$1" 2>/dev/null | cut -f1 || echo "0"
+    du -sb --max-depth=0 "$1" 2>/dev/null | cut -f1 || echo "0"
 }
 
-# Get last modification time of any file under a path
+# Get last modification time — uses restic locks/snapshots dir mtime
+# instead of expensive recursive find across SMB
 get_last_activity() {
     local path="$1"
-    local newest
-    newest=$(find "$path" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
-    if [[ -n "$newest" ]]; then
-        date -d "@${newest%%.*}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "N/A"
+    local newest=0
+
+    # Check mtime of key directories (fast — no recursion)
+    for marker in "$path"/*/snapshots "$path"/*/locks "$path"/snapshots "$path"/locks; do
+        if [[ -d "$marker" ]]; then
+            local mtime
+            mtime=$(stat -c '%Y' "$marker" 2>/dev/null) || continue
+            if [[ $mtime -gt $newest ]]; then
+                newest=$mtime
+            fi
+        fi
+    done
+
+    # Fallback: check the data dir itself
+    if [[ $newest -eq 0 ]]; then
+        newest=$(stat -c '%Y' "$path" 2>/dev/null || echo "0")
+    fi
+
+    if [[ $newest -gt 0 ]]; then
+        date -d "@${newest}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "N/A"
     else
         echo "never"
     fi
@@ -124,18 +142,35 @@ get_last_activity() {
 # Get last modification timestamp (epoch) for staleness check
 get_last_activity_epoch() {
     local path="$1"
-    find "$path" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1
+    local newest=0
+
+    for marker in "$path"/*/snapshots "$path"/*/locks "$path"/snapshots "$path"/locks; do
+        if [[ -d "$marker" ]]; then
+            local mtime
+            mtime=$(stat -c '%Y' "$marker" 2>/dev/null) || continue
+            if [[ $mtime -gt $newest ]]; then
+                newest=$mtime
+            fi
+        fi
+    done
+
+    if [[ $newest -eq 0 ]]; then
+        newest=$(stat -c '%Y' "$path" 2>/dev/null || echo "0")
+    fi
+
+    echo "$newest"
 }
 
 # Count restic snapshots by counting files in snapshots/ directory
-# (works without restic password — just filesystem inspection)
+# Uses ls instead of find for speed on SMB mounts
 count_snapshots() {
     local data_dir="$1"
     local count=0
-    # Look for restic snapshot files in any VPS subdir
     for snapdir in "$data_dir"/*/snapshots "$data_dir"/snapshots; do
         if [[ -d "$snapdir" ]]; then
-            count=$(( count + $(find "$snapdir" -type f 2>/dev/null | wc -l) ))
+            local n
+            n=$(ls -1 "$snapdir" 2>/dev/null | wc -l)
+            count=$(( count + n ))
         fi
     done
     echo "$count"
@@ -364,11 +399,11 @@ show_client_detail() {
         output+="  (VPS agents v1.5.1+ sync automatically after each backup)\n"
     fi
 
-    # Disk usage breakdown
+    # Disk usage breakdown (depth=1 to avoid slow deep traversal on SMB)
     output+="\n"
     output+="DISK USAGE\n"
     local du_output
-    du_output=$(du -h --max-depth=2 "$client_dir" 2>/dev/null | sort -rh | head -15) || true
+    du_output=$(du -h --max-depth=1 "$client_dir" 2>/dev/null | sort -rh | head -15) || true
     if [[ -n "$du_output" ]]; then
         output+="$du_output\n"
     fi
