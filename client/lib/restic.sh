@@ -300,6 +300,7 @@ restic_report_stats() {
 # ──────────────────────────────────────────────
 healthcheck_ping() {
     local status="${1:-success}"  # success or fail
+    local message="${2:-}"        # optional summary message
 
     if [[ -z "${HEALTHCHECK_URL:-}" ]]; then
         return 0
@@ -312,7 +313,51 @@ healthcheck_ping() {
 
     log_debug "Pinging healthcheck: $url"
 
-    # Best-effort: don't fail the backup if the ping fails
-    curl -fsS --max-time 10 --retry 3 "$url" >/dev/null 2>&1 || \
+    # Build a summary body for services that support it (healthchecks.io, etc.)
+    local body=""
+    body+="Host:     ${HOST_ID:-unknown}"$'\n'
+    body+="Client:   ${CLIENT_ID:-unknown}"$'\n'
+    body+="Env:      ${ENVIRONMENT:-unknown}"$'\n'
+    body+="Agent:    v${AGENT_VERSION:-unknown}"$'\n'
+    body+="Duration: $(get_elapsed 2>/dev/null || echo 'N/A')"$'\n'
+
+    # Add snapshot stats if available (restic env already set by backup phases)
+    if [[ "$status" == "success" ]] && [[ -n "${RESTIC_REPOSITORY:-}" ]]; then
+        local stats_json
+        stats_json=$(restic stats --json --mode restore-size latest 2>/dev/null) || true
+        if [[ -n "$stats_json" ]] && command -v jq &>/dev/null; then
+            local total_size total_count human_size
+            total_size=$(echo "$stats_json" | jq -r '.total_size // 0')
+            total_count=$(echo "$stats_json" | jq -r '.total_file_count // 0')
+            if [[ $total_size -gt $((1024*1024*1024)) ]]; then
+                human_size="$(( total_size / 1024 / 1024 / 1024 )) GB"
+            elif [[ $total_size -gt $((1024*1024)) ]]; then
+                human_size="$(( total_size / 1024 / 1024 )) MB"
+            else
+                human_size="$(( total_size / 1024 )) KB"
+            fi
+            body+="Size:     ${human_size} (${total_count} files)"$'\n'
+        fi
+
+        local snap_count
+        snap_count=$(restic snapshots --json 2>/dev/null | jq 'length' 2>/dev/null) || true
+        if [[ -n "$snap_count" ]]; then
+            body+="Snaps:    ${snap_count} total"$'\n'
+        fi
+    fi
+
+    # Add error details on failure
+    if [[ "$status" == "fail" ]] && [[ -n "$message" ]]; then
+        body+=$'\n'"Errors:"$'\n'"${message}"$'\n'
+    elif [[ "$status" == "fail" ]]; then
+        local errors
+        errors=$(get_error_summary 2>/dev/null) || true
+        if [[ -n "$errors" ]]; then
+            body+=$'\n'"Errors:"$'\n'"${errors}"$'\n'
+        fi
+    fi
+
+    # Best-effort POST with body: don't fail the backup if the ping fails
+    curl -fsS --max-time 10 --retry 3 -X POST --data-raw "$body" "$url" >/dev/null 2>&1 || \
         log_warn "Healthcheck ping failed (non-critical)"
 }

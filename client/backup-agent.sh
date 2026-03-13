@@ -162,7 +162,7 @@ main() {
     log_section "Phase 2: Restic backup"
     if ! restic_backup; then
         notify_failure "restic backup" "Restic backup command failed"
-        healthcheck_ping "fail"
+        healthcheck_ping "fail" "Restic backup command failed"
         die "Restic backup failed"
     fi
 

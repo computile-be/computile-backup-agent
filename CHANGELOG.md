@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] - 2026-03-13
+
+### Added
+- Healthcheck pings now include a detailed summary in the request body — host, client, environment, agent version, duration, snapshot size/count on success, error details on failure
+- Compatible with healthchecks.io, Uptime Kuma, and any service that accepts POST body data
+
 ## [1.2.3] - 2026-03-13
 
 ### Fixed
