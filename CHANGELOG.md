@@ -4,6 +4,20 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.1] - 2026-03-14
+
+### Added
+- **Add SSH key** from user management menu: paste a key or read from a file, with duplicate detection and key validation
+- **Refresh size cache** option in main menu to force recomputation of storage sizes
+- **Stale lock detection**: lock files older than 1 hour are flagged as potentially stuck
+- Auth logs now fall back to journald when `/var/log/auth.log` is not available
+
+### Fixed
+- `--version` now reads from gateway path (`/usr/local/lib/computile-gateway/VERSION`) instead of client path
+- `list_clients` no longer crashes with `set -u` when no backup clients exist
+- Replaced remaining `find` calls (lock detection, snapshot counting) with direct directory listing for SMB performance
+- Fixed storage view subshell variable loss in sort pipe
+
 ## [1.7.0] - 2026-03-14
 
 ### Added

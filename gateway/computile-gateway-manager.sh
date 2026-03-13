@@ -89,14 +89,10 @@ yesno() {
 # List all backup-* users (client IDs)
 list_clients() {
     # Find backup-* directories in BACKUP_BASE
-    local clients=()
     for dir in "${BACKUP_BASE}"/backup-*; do
         [[ -d "$dir" ]] || continue
-        local username
-        username=$(basename "$dir")
-        clients+=("$username")
+        basename "$dir"
     done
-    printf '%s\n' "${clients[@]}"
 }
 
 # Size cache: avoids repeated expensive du calls over SMB
@@ -408,7 +404,7 @@ show_client_detail() {
                 vps_snaps=$(count_snapshots "$vps_path")
                 # If no snapshots dir but has restic config, count at this level
                 if [[ $vps_snaps -eq 0 ]] && is_restic_repo "$vps_path"; then
-                    vps_snaps=$(find "$vps_path/snapshots" -type f 2>/dev/null | wc -l)
+                    vps_snaps=$(ls -1 "$vps_path/snapshots" 2>/dev/null | wc -l)
                 fi
                 local vps_last
                 vps_last=$(get_last_activity "$vps_path")
@@ -505,24 +501,26 @@ show_active_sessions() {
     # Restic lock files (indicate active backup operations)
     output+="ACTIVE LOCKS (restic)\n"
     local locks_found=false
+    local now_lock
+    now_lock=$(date +%s)
     for client_dir in "${BACKUP_BASE}"/backup-*/data; do
         [[ -d "$client_dir" ]] || continue
-        # Search for lock files recursively
-        local locks
-        locks=$(find "$client_dir" -path '*/locks/*' -type f 2>/dev/null) || true
-        if [[ -n "$locks" ]]; then
-            while IFS= read -r lock; do
-                local lock_age
-                lock_age=$(stat -c '%Y' "$lock" 2>/dev/null || echo "0")
-                local now
-                now=$(date +%s)
-                local age_mins=$(( (now - lock_age) / 60 ))
-                local client_name
-                client_name=$(echo "$lock" | sed "s|${BACKUP_BASE}/||" | cut -d/ -f1)
-                output+="  ${client_name}: lock file (${age_mins}min old) — $(basename "$lock")\n"
+        local client_name
+        client_name=$(basename "$(dirname "$client_dir")")
+        # Check known lock paths: data/locks/ and data/*/locks/
+        for lockdir in "$client_dir"/locks "$client_dir"/*/locks; do
+            [[ -d "$lockdir" ]] || continue
+            for lock in "$lockdir"/*; do
+                [[ -f "$lock" ]] || continue
+                local lock_epoch
+                lock_epoch=$(stat -c '%Y' "$lock" 2>/dev/null || echo "0")
+                local age_mins=$(( (now_lock - lock_epoch) / 60 ))
+                local stale_marker=""
+                if [[ $age_mins -gt 60 ]]; then stale_marker=" [STALE - may be stuck]"; fi
+                output+="  ${client_name}: $(basename "$lock") (${age_mins}min old)${stale_marker}\n"
                 locks_found=true
-            done <<< "$locks"
-        fi
+            done
+        done
     done
     if ! $locks_found; then
         output+="  No active locks.\n"
@@ -829,6 +827,7 @@ manage_users() {
             "create"  "Create new backup user" \
             "remove"  "Remove backup user" \
             "keys"    "View SSH keys for a user" \
+            "addkey"  "Add SSH key to a user" \
             "back"    "Back to main menu" \
             3>&1 1>&2 2>&3) || break
 
@@ -837,6 +836,7 @@ manage_users() {
             create) create_user_interactive ;;
             remove) remove_user_interactive ;;
             keys)   show_user_keys ;;
+            addkey) add_user_key ;;
             back|"") break ;;
         esac
     done
@@ -1015,6 +1015,88 @@ show_user_keys() {
     msg_scroll "SSH Keys: ${choice}" "$(echo -e "$output")"
 }
 
+add_user_key() {
+    # Select client
+    local clients=()
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        clients+=("$display" "")
+    done < <(list_clients)
+
+    if [[ ${#clients[@]} -eq 0 ]]; then
+        msg_box "Add SSH Key" "No backup users found."
+        return
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Add SSH Key" \
+        --menu "Select client:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${clients[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    local username="backup-${choice}"
+    local ssh_dir="${BACKUP_BASE}/${username}/.ssh"
+    local auth_keys="${ssh_dir}/authorized_keys"
+
+    # Get the public key — either paste or file path
+    local method
+    method=$($DIALOG --title "Add SSH Key" \
+        --menu "How to provide the key?" 10 $WT_WIDTH 3 \
+        "paste" "Paste the public key" \
+        "file"  "Read from a file path" \
+        3>&1 1>&2 2>&3) || return
+
+    local pubkey=""
+    case "$method" in
+        paste)
+            pubkey=$($DIALOG --title "Add SSH Key" \
+                --inputbox "Paste the full public key (ssh-ed25519 ... or ssh-rsa ...):" 10 $WT_WIDTH \
+                3>&1 1>&2 2>&3) || return
+            ;;
+        file)
+            local keyfile
+            keyfile=$($DIALOG --title "Add SSH Key" \
+                --inputbox "Path to public key file:" 10 $WT_WIDTH "/tmp/id_ed25519.pub" \
+                3>&1 1>&2 2>&3) || return
+            if [[ ! -f "$keyfile" ]]; then
+                msg_box "Error" "File not found: ${keyfile}"
+                return
+            fi
+            pubkey=$(cat "$keyfile")
+            ;;
+    esac
+
+    if [[ -z "$pubkey" ]]; then
+        msg_box "Error" "No key provided."
+        return
+    fi
+
+    # Validate it looks like an SSH key
+    if [[ ! "$pubkey" =~ ^ssh- ]] && [[ ! "$pubkey" =~ ^ecdsa- ]]; then
+        msg_box "Error" "This doesn't look like an SSH public key.\nExpected: ssh-ed25519, ssh-rsa, ecdsa-sha2-..."
+        return
+    fi
+
+    # Check for duplicates
+    if [[ -f "$auth_keys" ]] && grep -qF "$pubkey" "$auth_keys" 2>/dev/null; then
+        msg_box "Add SSH Key" "This key is already authorized for ${username}."
+        return
+    fi
+
+    # Ensure .ssh directory exists with correct permissions
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    chown "${username}:backupusers" "$ssh_dir"
+    touch "$auth_keys"
+    chmod 600 "$auth_keys"
+    chown "${username}:backupusers" "$auth_keys"
+
+    # Add the key
+    echo "$pubkey" >> "$auth_keys"
+    msg_box "Add SSH Key" "Key added successfully for ${username}.\n\nFingerprint: $(echo "$pubkey" | ssh-keygen -lf /dev/stdin 2>/dev/null || echo 'N/A')"
+}
+
 # ──────────────────────────────────────────────
 # Storage breakdown
 # ──────────────────────────────────────────────
@@ -1032,8 +1114,19 @@ show_storage() {
     fi
     output+="$(df -h "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {printf "  Total: %s  Used: %s  Available: %s  Usage: %s", $2, $3, $4, $5}')\n\n"
 
+    # Check cache freshness
+    local cache_info="(not cached yet)"
+    if [[ -d "$SIZE_CACHE_DIR" ]]; then
+        local newest_cache
+        newest_cache=$(stat -c '%Y' "$SIZE_CACHE_DIR"/* 2>/dev/null | sort -rn | head -1) || true
+        if [[ -n "$newest_cache" ]]; then
+            local cache_age_mins=$(( ($(date +%s) - newest_cache) / 60 ))
+            cache_info="(cached ${cache_age_mins}min ago)"
+        fi
+    fi
+
     # Per-client breakdown sorted by size
-    output+="PER-CLIENT USAGE (sorted by size)\n"
+    output+="PER-CLIENT USAGE ${cache_info}\n"
     output+="$(printf '  %-24s  %s\n' 'CLIENT' 'SIZE')\n"
     output+="  $(printf '%0.s-' {1..40})\n"
 
@@ -1046,20 +1139,22 @@ show_storage() {
         size_bytes=$(get_size_bytes "${BACKUP_BASE}/${client}")
         local size_human
         size_human=$(get_size "${BACKUP_BASE}/${client}")
-        echo "${size_bytes} ${client} ${size_human}" >> "$tmpfile"
+        printf '%s %s %s\n' "$size_bytes" "$client" "$size_human" >> "$tmpfile"
     done < <(list_clients)
 
-    sort -rn "$tmpfile" | while IFS=' ' read -r _ client size; do
+    # Read sorted output (avoid subshell variable loss)
+    while IFS=' ' read -r _ client size; do
         local display="${client#backup-}"
-        output+="$(printf '  %-24s  %s\n' "$display" "$size")"
-        echo "$output" > /dev/null  # force variable in subshell
-        printf '  %-24s  %s\n' "$display" "$size"
-    done > "${tmpfile}.display"
-
-    output+="$(cat "${tmpfile}.display" 2>/dev/null)\n"
-    rm -f "$tmpfile" "${tmpfile}.display"
+        output+="$(printf '  %-24s  %s\n' "$display" "$size")\n"
+    done < <(sort -rn "$tmpfile")
+    rm -f "$tmpfile"
 
     msg_scroll "Storage" "$(echo -e "$output")"
+}
+
+_clear_size_cache() {
+    rm -rf "${SIZE_CACHE_DIR:?}"/*
+    msg_box "Cache" "Size cache cleared. Next storage view will recompute all sizes."
 }
 
 # ──────────────────────────────────────────────
@@ -1112,8 +1207,15 @@ show_auth_logs() {
     output+="RECENT SFTP AUTH LOGS (last 50 backup-related entries)\n"
     output+="$(printf '%0.s-' {1..70})\n\n"
 
-    local logs
-    logs=$(grep 'backup-' /var/log/auth.log 2>/dev/null | tail -50) || true
+    local logs=""
+    # Try /var/log/auth.log first, fall back to journald
+    if [[ -f /var/log/auth.log ]]; then
+        logs=$(grep 'backup-' /var/log/auth.log 2>/dev/null | tail -50) || true
+        output+="Source: /var/log/auth.log\n\n"
+    elif command -v journalctl &>/dev/null; then
+        logs=$(journalctl -u ssh -u sshd --no-pager -n 200 2>/dev/null | grep 'backup-' | tail -50) || true
+        output+="Source: journald (ssh/sshd)\n\n"
+    fi
 
     if [[ -n "$logs" ]]; then
         output+="$logs\n"
@@ -1148,7 +1250,8 @@ main_menu() {
             "client"     "Inspect a specific client" \
             "sessions"   "Active SFTP sessions & locks" \
             "alerts"     "Stale backup alerts" \
-            "storage"    "Storage breakdown (computes sizes)" \
+            "storage"    "Storage breakdown (sizes cached 1h)" \
+            "clearcache" "Refresh size cache" \
             "health"     "System health (SMB, SSH, fail2ban)" \
             "fail2ban"   "Fail2ban: view/unban IPs" \
             "logs"       "View auth logs" \
@@ -1161,8 +1264,9 @@ main_menu() {
             client)   show_client_detail ;;
             sessions) show_active_sessions ;;
             alerts)   show_stale_alerts ;;
-            storage)  show_storage ;;
-            health)   show_system_health ;;
+            storage)    show_storage ;;
+            clearcache) _clear_size_cache ;;
+            health)     show_system_health ;;
             fail2ban) manage_fail2ban ;;
             logs)     show_auth_logs ;;
             users)    manage_users ;;
@@ -1214,7 +1318,7 @@ HELP
         exit 0
         ;;
     --version)
-        echo "computile-gateway-manager v$(cat /usr/local/lib/computile-backup/VERSION 2>/dev/null || echo 'dev')"
+        echo "computile-gateway-manager v$(cat /usr/local/lib/computile-gateway/VERSION 2>/dev/null || echo 'dev')"
         exit 0
         ;;
     "")
