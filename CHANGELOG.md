@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.2] - 2026-03-13
+
+### Fixed
+- SSH connectivity test in TUI manager now uses SFTP instead of SSH shell commands — the gateway uses `ForceCommand internal-sftp` which blocks regular SSH, causing the test to hang
+
 ## [1.2.1] - 2026-03-13
 
 ### Fixed

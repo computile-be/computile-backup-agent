@@ -547,25 +547,68 @@ check_ssh_connectivity() {
     echo
 
     local output=""
-    local rc=0
 
-    # Test SSH connection
-    echo "→ Testing SSH connection..."
-    ssh_output=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "${ssh_target}" echo "SSH OK" 2>&1) || rc=$?
+    # Test 1: SFTP connectivity (the gateway uses ForceCommand internal-sftp,
+    # so regular SSH commands won't work — SFTP is the real transport)
+    echo "→ Testing SFTP connection..."
+    local sftp_rc=0
+    local sftp_output
+    sftp_output=$(echo "ls" | sftp -o ConnectTimeout=10 -o BatchMode=yes "${ssh_target}" 2>&1) || sftp_rc=$?
 
-    output+="SSH CONNECTION\n"
+    output+="SFTP CONNECTION\n"
     output+="  Target: ${ssh_target}\n"
-    if [[ $rc -eq 0 ]]; then
-        output+="  Result: ✓ Connected successfully\n"
-        output+="  Output: ${ssh_output}\n"
+    if [[ $sftp_rc -eq 0 ]]; then
+        output+="  Result: ✓ SFTP connected successfully\n"
     else
-        output+="  Result: ✗ Connection failed (exit code ${rc})\n"
-        output+="  Output: ${ssh_output}\n\n"
+        output+="  Result: ✗ SFTP connection failed (exit code ${sftp_rc})\n"
+        output+="  Output:\n"
+        # Indent sftp output for readability
+        while IFS= read -r errline; do
+            output+="    ${errline}\n"
+        done <<< "$sftp_output"
+        output+="\n"
+    fi
+    output+="\n"
+
+    # Test 2: SSH transport layer (key exchange, auth)
+    echo "→ Testing SSH transport..."
+    local ssh_rc=0
+    local ssh_output
+    ssh_output=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "${ssh_target}" true 2>&1) || ssh_rc=$?
+
+    output+="SSH TRANSPORT\n"
+    # exit code 0 = shell access (unlikely with ForceCommand)
+    # exit code 1 = connected but command rejected (expected with ForceCommand internal-sftp)
+    # exit code 255 = connection failed
+    if [[ $ssh_rc -eq 0 ]] || [[ $ssh_rc -eq 1 ]]; then
+        output+="  Result: ✓ SSH auth OK (exit $ssh_rc"
+        if [[ $ssh_rc -eq 1 ]]; then
+            output+=" — expected: ForceCommand blocks shell access"
+        fi
+        output+=")\n"
+    else
+        output+="  Result: ✗ SSH connection failed (exit code ${ssh_rc})\n"
+        output+="  Output:\n"
+        while IFS= read -r errline; do
+            output+="    ${errline}\n"
+        done <<< "$ssh_output"
+        output+="\n"
+    fi
+    output+="\n"
+
+    # Overall verdict
+    if [[ $sftp_rc -eq 0 ]]; then
+        output+="VERDICT: ✓ Gateway is reachable and SFTP works — backups will function.\n"
+    elif [[ $ssh_rc -le 1 ]]; then
+        output+="VERDICT: ⚠ SSH auth works but SFTP failed — check gateway SFTP config.\n"
+    else
+        output+="VERDICT: ✗ Cannot reach gateway.\n\n"
         output+="TROUBLESHOOTING\n"
-        output+="  • Check that the gateway is reachable (Tailscale running?)\n"
-        output+="  • Verify SSH key is authorized on the gateway\n"
+        output+="  • Is Tailscale running? tailscale status\n"
+        output+="  • Is the gateway reachable? ping $(echo "${ssh_target}" | cut -d@ -f2)\n"
+        output+="  • Is the SSH key authorized? Check gateway authorized_keys\n"
         output+="  • Check SSH config: cat ~/.ssh/config\n"
-        output+="  • Test manually: ssh -v ${ssh_target}\n"
+        output+="  • Verbose test: sftp -v ${ssh_target}\n"
     fi
 
     msg_scroll "SSH Connectivity" "$(echo -e "$output")"
