@@ -1,0 +1,12 @@
+# Secrets & credentials
+*.password
+*.credentials
+.smb-credentials
+msmtprc
+
+# Local config (contains client-specific values)
+backup-agent.conf
+
+# Internal brief
+BRIEF.MD
+.claude/

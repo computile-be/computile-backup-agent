@@ -1,0 +1,48 @@
+# computile-backup-agent — Exclusion patterns
+# Copy to /etc/computile-backup/excludes.txt and edit.
+# One pattern per line. See: https://restic.readthedocs.io/en/latest/040_backup.html#excluding-files
+
+# Docker internal data (DB files are backed up via dumps)
+/var/lib/docker/overlay2
+/var/lib/docker/image
+/var/lib/docker/containers/*/log-*
+/var/lib/docker/buildkit
+/var/lib/docker/tmp
+
+# System temp / cache
+/tmp
+/var/tmp
+/var/cache
+/var/lib/apt
+/var/lib/dpkg
+
+# Swap & memory
+*.swp
+*.swap
+/swapfile
+
+# Logs (optional — uncomment to exclude)
+# /var/log
+
+# Node modules / vendor (usually reproducible)
+**/node_modules
+**/vendor
+**/.venv
+**/__pycache__
+
+# Build artifacts
+**/.next
+**/dist
+**/build
+**/.cache
+
+# OS files
+.Trash*
+*.DS_Store
+Thumbs.db
+
+# Restic cache
+/var/cache/restic
+
+# Backup temp files (our own dumps are included separately)
+/var/backups/computile/tmp

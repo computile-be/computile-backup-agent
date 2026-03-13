@@ -1,0 +1,102 @@
+# ================================================================
+# computile-backup-agent — Configuration file
+#
+# Copy to /etc/computile-backup/backup-agent.conf and edit.
+# ================================================================
+
+# ──────────────────────────────────────────────
+# Identity
+# ──────────────────────────────────────────────
+CLIENT_ID="client-name"
+HOST_ID="vps-prod-01"
+ENVIRONMENT="prod"          # prod, staging, dev
+ROLE="coolify"              # coolify, forge, hybrid, docker, bare
+
+# ──────────────────────────────────────────────
+# Restic repository (via SFTP over Tailscale)
+# ──────────────────────────────────────────────
+RESTIC_REPOSITORY="sftp:backup-${CLIENT_ID}@backup-gateway:/data/${HOST_ID}"
+RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
+# RESTIC_CACHE_DIR="/var/cache/restic"
+
+# ──────────────────────────────────────────────
+# Paths
+# ──────────────────────────────────────────────
+BACKUP_ROOT="/var/backups/computile"
+LOG_FILE="/var/log/computile-backup.log"
+
+# Paths to include in backup
+INCLUDE_PATHS=(
+    /etc
+    /home
+    /root
+    /var/www
+    /opt
+    /srv
+    /data
+    /data/coolify
+)
+
+# Exclusion file (one pattern per line)
+EXCLUDE_FILE="/etc/computile-backup/excludes.txt"
+
+# ──────────────────────────────────────────────
+# Retention policy
+# ──────────────────────────────────────────────
+RETENTION_KEEP_DAILY=7
+RETENTION_KEEP_WEEKLY=4
+RETENTION_KEEP_MONTHLY=6
+
+# ──────────────────────────────────────────────
+# Docker & database discovery
+# ──────────────────────────────────────────────
+DOCKER_ENABLED="yes"
+DOCKER_DB_AUTO_DISCOVERY="yes"
+
+# Per-database type toggle
+MYSQL_DUMP_ENABLED="yes"
+POSTGRES_DUMP_ENABLED="yes"
+REDIS_SNAPSHOT_ENABLED="no"    # "yes" to enable Redis BGSAVE snapshots
+
+# Days to keep local dump files before cleanup
+DUMP_CLEANUP_DAYS=3
+
+# ──────────────────────────────────────────────
+# Manual database entries (optional)
+# ──────────────────────────────────────────────
+# Format: "container_name|db_type|user|password|databases"
+# - db_type: mysql, postgres, redis
+# - databases: comma-separated list, or empty for all
+# - password: leave empty to auto-detect from container env
+#
+# MANUAL_DBS=(
+#     "my-mariadb|mysql|root||app_db,other_db"
+#     "my-postgres|postgres|postgres||"
+#     "custom-pg|postgres|myuser|mypassword|mydb"
+# )
+
+# ──────────────────────────────────────────────
+# Email notifications (via msmtp)
+# ──────────────────────────────────────────────
+EMAIL_ENABLED="yes"
+EMAIL_TO="alerts@computile.be"
+EMAIL_FROM="backup@computile.email"
+EMAIL_ON_SUCCESS="no"          # "yes" to also notify on success
+
+# OVH SMTP settings
+SMTP_HOST="ssl0.ovh.net"
+SMTP_PORT="587"
+SMTP_USER="backup@computile.email"
+SMTP_PASS_FILE="/etc/computile-backup/smtp-password"
+
+# ──────────────────────────────────────────────
+# Verification
+# ──────────────────────────────────────────────
+VERIFY_AFTER_BACKUP="yes"
+VERIFY_CHECK_DATA="no"        # "yes" to run restic check --read-data-subset
+
+# ──────────────────────────────────────────────
+# Misc
+# ──────────────────────────────────────────────
+VERBOSE="no"
+DRY_RUN="no"

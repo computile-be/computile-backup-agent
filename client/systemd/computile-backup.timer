@@ -1,0 +1,12 @@
+[Unit]
+Description=Computile Backup Agent — Daily timer
+Documentation=https://github.com/computile/computile-backup-agent
+
+[Timer]
+# Run daily at 02:15 with some randomization to avoid thundering herd
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

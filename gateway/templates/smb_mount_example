@@ -1,0 +1,39 @@
+# computile-backup — SMB/CIFS mount example
+#
+# This file shows how to mount a Synology share on the gateway VM.
+#
+# ──────────────────────────────────────────────
+# 1. Create credentials file
+# ──────────────────────────────────────────────
+# sudo nano /root/.smb-credentials
+#
+#   username=backup-svc
+#   password=YourSecurePassword
+#
+# sudo chmod 600 /root/.smb-credentials
+#
+# ──────────────────────────────────────────────
+# 2. Add to /etc/fstab
+# ──────────────────────────────────────────────
+# //synology-ip/backups  /srv/backups  cifs  credentials=/root/.smb-credentials,uid=0,gid=0,dir_mode=0755,file_mode=0644,iocharset=utf8,nofail,_netdev,vers=3.0  0  0
+#
+# ──────────────────────────────────────────────
+# 3. Mount
+# ──────────────────────────────────────────────
+# sudo mount /srv/backups
+#
+# ──────────────────────────────────────────────
+# 4. Verify
+# ──────────────────────────────────────────────
+# df -h /srv/backups
+# ls -la /srv/backups
+#
+# ──────────────────────────────────────────────
+# Notes
+# ──────────────────────────────────────────────
+# - Use vers=3.0 for SMBv3 (recommended for Synology DSM 7+)
+# - nofail: don't block boot if mount fails
+# - _netdev: wait for network before mounting
+# - uid=0,gid=0: mount as root (backup users access via chroot)
+# - On Synology: create a dedicated "backup-svc" local user
+#   with access only to the backup shared folder

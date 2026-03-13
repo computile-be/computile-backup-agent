@@ -1,0 +1,28 @@
+[Unit]
+Description=Computile Backup Agent
+Documentation=https://github.com/computile/computile-backup-agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/computile-backup
+Nice=10
+IOSchedulingClass=idle
+
+# Security hardening
+# Note: ProtectSystem=strict is not used because the agent needs access to
+# /var/run/docker.sock, /root/.ssh (for SFTP), and arbitrary INCLUDE_PATHS.
+PrivateTmp=true
+NoNewPrivileges=false
+
+# Timeouts
+TimeoutStartSec=3600
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=computile-backup
+
+[Install]
+WantedBy=multi-user.target
