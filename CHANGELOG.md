@@ -4,6 +4,18 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.0] - 2026-03-14
+
+### Added
+- **Stale lock removal**: locks older than 1 hour are offered for deletion directly from the "Sessions & locks" view — no more manual filesystem navigation
+- **Tailscale peers overview**: new menu item showing all Tailscale peers with hostname, IP, OS, online/offline status, and connection type (direct vs relayed)
+- **SFTP connectivity test per client**: validates user existence, home directory, SSH keys, permissions, group membership, and chroot ownership — diagnoses setup issues without leaving the TUI
+- **Client search**: search clients by partial name instead of scrolling through the full list — single match jumps directly to detail view
+- **Health report export**: `--report` (text) and `--report-json` (JSON) CLI flags for non-interactive full gateway health reports — includes system health, all client statuses, alerts, and active locks. Suitable for email, monitoring integrations, or dashboards
+
+### Changed
+- Refactored client detail view into reusable `_show_client_detail_for()` function (shared between browse and search)
+
 ## [1.7.1] - 2026-03-14
 
 ### Added

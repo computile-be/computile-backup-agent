@@ -90,7 +90,23 @@ sudo bash gateway/setup_gateway.sh --rollback
 ### Vérifier la version installée
 
 ```bash
-cat /usr/local/lib/computile-gateway/VERSION
+computile-gateway-manager --version
+```
+
+### Rapport de santé (non-interactif)
+
+```bash
+# Rapport texte (stdout)
+sudo computile-gateway-manager --report
+
+# Rapport JSON (pour intégration monitoring)
+sudo computile-gateway-manager --report-json
+
+# Envoyer par email
+sudo computile-gateway-manager --report | mail -s "Gateway Report" admin@example.com
+
+# Cron quotidien
+0 8 * * * /usr/local/bin/computile-gateway-manager --report >> /var/log/computile-gateway-report.log
 ```
 
 La version est aussi logguée à chaque exécution et taguée dans les snapshots restic (`agent:vX.Y.Z`).

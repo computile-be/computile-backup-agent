@@ -351,110 +351,7 @@ show_client_detail() {
         "${clients[@]}" \
         3>&1 1>&2 2>&3) || return
 
-    local username="backup-${choice}"
-    local client_dir="${BACKUP_BASE}/${username}"
-    local data_dir="${client_dir}/data"
-
-    local output=""
-    output+="CLIENT: ${choice}\n"
-    output+="$(printf '%0.s-' {1..60})\n"
-    output+="  User:      ${username}\n"
-    output+="  Directory: ${client_dir}\n"
-    output+="  Total size: $(get_size "$client_dir") (cached up to 1h)\n"
-    output+="  Last activity: $(get_last_activity "$data_dir" 2>/dev/null || echo 'N/A')\n"
-
-    # SSH key
-    local auth_keys="${client_dir}/.ssh/authorized_keys"
-    if [[ -f "$auth_keys" ]]; then
-        local key_count
-        key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo "0")
-        output+="  SSH keys: ${key_count}\n"
-    else
-        output+="  SSH keys: none\n"
-    fi
-    output+="\n"
-
-    # Check for VPS directories vs direct restic repo
-    if [[ -d "$data_dir" ]]; then
-        if is_restic_repo "$data_dir"; then
-            # Single restic repo directly in data/
-            output+="REPOSITORY (direct)\n"
-            local snaps
-            snaps=$(count_snapshots "$data_dir")
-            output+="  Snapshots: ${snaps}\n"
-            output+="  Size:      $(get_size "$data_dir")\n"
-            output+="  Last mod:  $(get_last_activity "$data_dir")\n"
-        else
-            # VPS subdirectories
-            output+="VPS DIRECTORIES\n"
-            output+="$(printf '  %-20s  %-8s  %-6s  %s\n' 'VPS' 'SIZE' 'SNAPS' 'LAST ACTIVITY')\n"
-            output+="  $(printf '%0.s-' {1..64})\n"
-
-            local vps_found=false
-            for vps_path in "$data_dir"/*/; do
-                [[ -d "$vps_path" ]] || continue
-                local vps_name
-                vps_name=$(basename "$vps_path")
-                # Skip _meta directory (recovery metadata, shown separately)
-                [[ "$vps_name" == "_meta" ]] && continue
-
-                local vps_size
-                vps_size=$(get_size "$vps_path")
-                local vps_snaps
-                vps_snaps=$(count_snapshots "$vps_path")
-                # If no snapshots dir but has restic config, count at this level
-                if [[ $vps_snaps -eq 0 ]] && is_restic_repo "$vps_path"; then
-                    vps_snaps=$(ls -1 "$vps_path/snapshots" 2>/dev/null | wc -l)
-                fi
-                local vps_last
-                vps_last=$(get_last_activity "$vps_path")
-
-                output+="$(printf '  %-20s  %-8s  %-6s  %s\n' "$vps_name" "$vps_size" "$vps_snaps" "$vps_last")\n"
-                vps_found=true
-            done
-
-            if ! $vps_found; then
-                output+="  (no VPS directories found)\n"
-            fi
-        fi
-    else
-        output+="  Data directory not found\n"
-    fi
-
-    # Recovery metadata
-    local meta_dir="${data_dir}/_meta"
-    output+="\n"
-    output+="RECOVERY METADATA\n"
-    if [[ -d "$meta_dir" ]]; then
-        for vps_meta in "$meta_dir"/*/; do
-            [[ -d "$vps_meta" ]] || continue
-            local vps_id
-            vps_id=$(basename "$vps_meta")
-            local has_password="no"
-            local has_config="no"
-            local has_key="no"
-            if [[ -f "$vps_meta/restic-password" ]]; then has_password="yes"; fi
-            if [[ -f "$vps_meta/backup-agent.conf" ]]; then has_config="yes"; fi
-            if [[ -f "$vps_meta/ssh-public-key.pub" ]]; then has_key="yes"; fi
-            local meta_age
-            meta_age=$(get_last_activity "$vps_meta")
-            output+="  ${vps_id}: password=${has_password} config=${has_config} ssh-key=${has_key} (updated: ${meta_age})\n"
-        done
-    else
-        output+="  No recovery metadata synced yet.\n"
-        output+="  (VPS agents v1.5.1+ sync automatically after each backup)\n"
-    fi
-
-    # Disk usage breakdown (depth=1 to avoid slow deep traversal on SMB)
-    output+="\n"
-    output+="DISK USAGE\n"
-    local du_output
-    du_output=$(du -h --max-depth=1 "$client_dir" 2>/dev/null | sort -rh | head -15) || true
-    if [[ -n "$du_output" ]]; then
-        output+="$du_output\n"
-    fi
-
-    msg_scroll "Client: ${choice}" "$(echo -e "$output")"
+    _show_client_detail_for "$choice"
 }
 
 # ──────────────────────────────────────────────
@@ -527,6 +424,67 @@ show_active_sessions() {
     fi
 
     msg_scroll "Active Sessions & Operations" "$(echo -e "$output")"
+
+    # Offer to remove stale locks if any were found
+    if $locks_found; then
+        remove_stale_locks
+    fi
+}
+
+# Remove stale restic lock files (older than 1 hour)
+remove_stale_locks() {
+    local stale_locks=()
+    local stale_labels=()
+    local now_rm
+    now_rm=$(date +%s)
+
+    for client_dir in "${BACKUP_BASE}"/backup-*/data; do
+        [[ -d "$client_dir" ]] || continue
+        local client_name
+        client_name=$(basename "$(dirname "$client_dir")")
+        for lockdir in "$client_dir"/locks "$client_dir"/*/locks; do
+            [[ -d "$lockdir" ]] || continue
+            for lock in "$lockdir"/*; do
+                [[ -f "$lock" ]] || continue
+                local lock_epoch
+                lock_epoch=$(stat -c '%Y' "$lock" 2>/dev/null || echo "0")
+                local age_mins=$(( (now_rm - lock_epoch) / 60 ))
+                if [[ $age_mins -gt 60 ]]; then
+                    stale_locks+=("$lock")
+                    stale_labels+=("${client_name#backup-}: $(basename "$lock") (${age_mins}min)")
+                fi
+            done
+        done
+    done
+
+    if [[ ${#stale_locks[@]} -eq 0 ]]; then
+        return
+    fi
+
+    local detail=""
+    for label in "${stale_labels[@]}"; do
+        detail+="  ${label}\n"
+    done
+
+    if ! yesno "Stale Locks" "Found ${#stale_locks[@]} stale lock(s) (>1h old):\n\n${detail}\nRemove them?"; then
+        return
+    fi
+
+    local removed=0
+    local errors=0
+    for lock in "${stale_locks[@]}"; do
+        if rm -f "$lock" 2>/dev/null; then
+            ((removed++)) || true
+        else
+            ((errors++)) || true
+        fi
+    done
+
+    if [[ $errors -eq 0 ]]; then
+        msg_box "Stale Locks" "Removed ${removed} stale lock(s)."
+    else
+        msg_box "Stale Locks" "Removed ${removed}, failed ${errors}. Check permissions."
+    fi
 }
 
 # ──────────────────────────────────────────────
@@ -1098,6 +1056,355 @@ add_user_key() {
 }
 
 # ──────────────────────────────────────────────
+# Tailscale peers overview
+# ──────────────────────────────────────────────
+show_tailscale_peers() {
+    local output=""
+    output+="TAILSCALE PEERS\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
+
+    if ! command -v tailscale &>/dev/null; then
+        output+="Tailscale is not installed on this gateway.\n"
+        msg_scroll "Tailscale Peers" "$(echo -e "$output")"
+        return
+    fi
+
+    local ts_self
+    ts_self=$(tailscale status --self 2>/dev/null | head -1) || ts_self=""
+    if [[ -n "$ts_self" ]]; then
+        output+="THIS NODE\n"
+        output+="  ${ts_self}\n\n"
+    fi
+
+    local ts_status
+    ts_status=$(tailscale status 2>/dev/null) || true
+
+    if [[ -z "$ts_status" ]]; then
+        output+="Cannot retrieve Tailscale status. Is Tailscale running?\n"
+        msg_scroll "Tailscale Peers" "$(echo -e "$output")"
+        return
+    fi
+
+    local online=0
+    local offline=0
+    local total=0
+
+    output+="$(printf '%-20s  %-16s  %-10s  %-10s  %s\n' 'HOSTNAME' 'IP' 'OS' 'STATUS' 'RELAY')\n"
+    output+="$(printf '%0.s-' {1..70})\n"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # Skip header line if present
+        [[ "$line" == *"#"* ]] && continue
+        # tailscale status format: IP hostname user OS ... idle/active/offline ...
+        local ip hostname os status_field
+        ip=$(echo "$line" | awk '{print $1}')
+        hostname=$(echo "$line" | awk '{print $2}')
+        os=$(echo "$line" | awk '{print $5}')
+        # Check for relay info and online/offline
+        local relay="-"
+        local peer_status="online"
+        if echo "$line" | grep -q 'offline'; then
+            peer_status="offline"
+            ((offline++)) || true
+        else
+            ((online++)) || true
+            # Check for relay (DERP) vs direct
+            if echo "$line" | grep -q 'relay'; then
+                relay=$(echo "$line" | grep -oP 'relay "\K[^"]+' 2>/dev/null) || relay="relayed"
+            elif echo "$line" | grep -q 'direct'; then
+                relay="direct"
+            fi
+        fi
+        ((total++)) || true
+
+        output+="$(printf '%-20s  %-16s  %-10s  %-10s  %s\n' "$hostname" "$ip" "$os" "$peer_status" "$relay")\n"
+    done <<< "$ts_status"
+
+    output+="\n$(printf '%0.s-' {1..70})\n"
+    output+="Total: ${total} peers (${online} online, ${offline} offline)\n"
+
+    msg_scroll "Tailscale Peers" "$(echo -e "$output")"
+}
+
+# ──────────────────────────────────────────────
+# SFTP connectivity test per client
+# ──────────────────────────────────────────────
+test_sftp_client() {
+    local clients=()
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        local auth_keys="${BACKUP_BASE}/${client}/.ssh/authorized_keys"
+        local key_count=0
+        if [[ -f "$auth_keys" ]]; then
+            key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo "0")
+        fi
+        clients+=("$display" "${key_count} key(s)")
+    done < <(list_clients)
+
+    if [[ ${#clients[@]} -eq 0 ]]; then
+        msg_box "SFTP Test" "No backup clients found."
+        return
+    fi
+
+    local choice
+    choice=$($DIALOG --title "SFTP Test" \
+        --menu "Select client to test:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${clients[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    local username="backup-${choice}"
+    local client_dir="${BACKUP_BASE}/${username}"
+    local output=""
+    output+="SFTP CONNECTIVITY TEST: ${username}\n"
+    output+="$(printf '%0.s-' {1..60})\n\n"
+
+    # Check 1: User exists
+    if id "$username" &>/dev/null; then
+        output+="  [OK]    User '${username}' exists\n"
+        local user_groups
+        user_groups=$(id -nG "$username" 2>/dev/null)
+        output+="          Groups: ${user_groups}\n"
+    else
+        output+="  [FAIL]  User '${username}' does not exist\n"
+        msg_scroll "SFTP Test: ${choice}" "$(echo -e "$output")"
+        return
+    fi
+
+    # Check 2: Home directory
+    if [[ -d "$client_dir" ]]; then
+        output+="  [OK]    Home directory exists: ${client_dir}\n"
+        local dir_perms
+        dir_perms=$(stat -c '%a %U:%G' "$client_dir" 2>/dev/null || echo "?")
+        output+="          Permissions: ${dir_perms}\n"
+    else
+        output+="  [FAIL]  Home directory missing: ${client_dir}\n"
+    fi
+
+    # Check 3: SSH keys
+    local auth_keys="${client_dir}/.ssh/authorized_keys"
+    if [[ -f "$auth_keys" ]]; then
+        local key_count
+        key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo "0")
+        output+="  [OK]    authorized_keys: ${key_count} key(s)\n"
+        local key_perms
+        key_perms=$(stat -c '%a %U:%G' "$auth_keys" 2>/dev/null || echo "?")
+        output+="          Permissions: ${key_perms}\n"
+        # Warn if permissions are wrong
+        local key_mode
+        key_mode=$(stat -c '%a' "$auth_keys" 2>/dev/null || echo "000")
+        if [[ "$key_mode" != "600" ]]; then
+            output+="  [WARN]  authorized_keys should be 600, is ${key_mode}\n"
+        fi
+    else
+        output+="  [FAIL]  No authorized_keys file\n"
+    fi
+
+    # Check 4: .ssh directory permissions
+    local ssh_dir="${client_dir}/.ssh"
+    if [[ -d "$ssh_dir" ]]; then
+        local ssh_perms
+        ssh_perms=$(stat -c '%a' "$ssh_dir" 2>/dev/null || echo "000")
+        if [[ "$ssh_perms" == "700" ]]; then
+            output+="  [OK]    .ssh directory permissions: ${ssh_perms}\n"
+        else
+            output+="  [WARN]  .ssh directory should be 700, is ${ssh_perms}\n"
+        fi
+    fi
+
+    # Check 5: Data directory
+    local data_dir="${client_dir}/data"
+    if [[ -d "$data_dir" ]]; then
+        output+="  [OK]    Data directory exists\n"
+        local data_perms
+        data_perms=$(stat -c '%a %U:%G' "$data_dir" 2>/dev/null || echo "?")
+        output+="          Permissions: ${data_perms}\n"
+    else
+        output+="  [WARN]  Data directory missing (will be created on first backup)\n"
+    fi
+
+    # Check 6: SSHD config allows this user
+    output+="\n"
+    output+="SSHD CONFIG\n"
+    if [[ -f /etc/ssh/sshd_config.d/computile-backup.conf ]]; then
+        output+="  [OK]    computile-backup.conf present\n"
+        if grep -q 'ForceCommand internal-sftp' /etc/ssh/sshd_config.d/computile-backup.conf 2>/dev/null; then
+            output+="  [OK]    ForceCommand internal-sftp configured\n"
+        else
+            output+="  [WARN]  ForceCommand internal-sftp not found in config\n"
+        fi
+    else
+        output+="  [WARN]  No computile-backup.conf in sshd_config.d/\n"
+    fi
+
+    # Check 7: Actual SFTP test (connect as the user via localhost)
+    output+="\n"
+    output+="SFTP CONNECTION TEST\n"
+    # We can't do a real SFTP test as root without the user's private key,
+    # but we can verify the chroot setup and that sshd would accept the user
+    if getent group backupusers | grep -qw "$username" 2>/dev/null; then
+        output+="  [OK]    User is member of 'backupusers' group\n"
+    else
+        output+="  [FAIL]  User NOT in 'backupusers' group (SFTP will be rejected)\n"
+    fi
+
+    # Check chroot ownership (sshd requires root:root for ChrootDirectory)
+    local chroot_owner
+    chroot_owner=$(stat -c '%U:%G' "$client_dir" 2>/dev/null || echo "?:?")
+    if [[ "$chroot_owner" == "root:root" ]] || [[ "$chroot_owner" == "root:backupusers" ]]; then
+        output+="  [OK]    Chroot directory owner: ${chroot_owner}\n"
+    else
+        output+="  [WARN]  Chroot directory owner is ${chroot_owner} (sshd may require root ownership)\n"
+    fi
+
+    msg_scroll "SFTP Test: ${choice}" "$(echo -e "$output")"
+}
+
+# ──────────────────────────────────────────────
+# Client search
+# ──────────────────────────────────────────────
+search_client() {
+    local query
+    query=$($DIALOG --title "Search Client" \
+        --inputbox "Enter search term (partial name):" 10 $WT_WIDTH \
+        3>&1 1>&2 2>&3) || return
+
+    [[ -z "$query" ]] && return
+
+    # Find matching clients
+    local matches=()
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        # Case-insensitive match
+        if echo "$display" | grep -qi "$query" 2>/dev/null; then
+            local data_dir="${BACKUP_BASE}/${client}/data"
+            local snaps=0
+            if [[ -d "$data_dir" ]]; then
+                snaps=$(count_snapshots "$data_dir")
+            fi
+            matches+=("$display" "${snaps} snapshots")
+        fi
+    done < <(list_clients)
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        msg_box "Search" "No clients matching '${query}'."
+        return
+    fi
+
+    # If only one match, go directly to detail
+    if [[ ${#matches[@]} -eq 2 ]]; then
+        _show_client_detail_for "${matches[0]}"
+        return
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Search Results: '${query}'" \
+        --menu "Select a client:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${matches[@]}" \
+        3>&1 1>&2 2>&3) || return
+
+    _show_client_detail_for "$choice"
+}
+
+# Show detail for a specific client (reusable from search and detail view)
+_show_client_detail_for() {
+    local choice="$1"
+    local username="backup-${choice}"
+    local client_dir="${BACKUP_BASE}/${username}"
+    local data_dir="${client_dir}/data"
+
+    local output=""
+    output+="CLIENT: ${choice}\n"
+    output+="$(printf '%0.s-' {1..60})\n"
+    output+="  User:      ${username}\n"
+    output+="  Directory: ${client_dir}\n"
+    output+="  Total size: $(get_size "$client_dir") (cached up to 1h)\n"
+    output+="  Last activity: $(get_last_activity "$data_dir" 2>/dev/null || echo 'N/A')\n"
+
+    # SSH key
+    local auth_keys="${client_dir}/.ssh/authorized_keys"
+    if [[ -f "$auth_keys" ]]; then
+        local key_count
+        key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo "0")
+        output+="  SSH keys: ${key_count}\n"
+    else
+        output+="  SSH keys: none\n"
+    fi
+    output+="\n"
+
+    # Check for VPS directories vs direct restic repo
+    if [[ -d "$data_dir" ]]; then
+        if is_restic_repo "$data_dir"; then
+            output+="REPOSITORY (direct)\n"
+            local snaps
+            snaps=$(count_snapshots "$data_dir")
+            output+="  Snapshots: ${snaps}\n"
+            output+="  Size:      $(get_size "$data_dir")\n"
+            output+="  Last mod:  $(get_last_activity "$data_dir")\n"
+        else
+            output+="VPS DIRECTORIES\n"
+            output+="$(printf '  %-20s  %-8s  %-6s  %s\n' 'VPS' 'SIZE' 'SNAPS' 'LAST ACTIVITY')\n"
+            output+="  $(printf '%0.s-' {1..64})\n"
+
+            local vps_found=false
+            for vps_path in "$data_dir"/*/; do
+                [[ -d "$vps_path" ]] || continue
+                local vps_name
+                vps_name=$(basename "$vps_path")
+                [[ "$vps_name" == "_meta" ]] && continue
+
+                local vps_size
+                vps_size=$(get_size "$vps_path")
+                local vps_snaps
+                vps_snaps=$(count_snapshots "$vps_path")
+                if [[ $vps_snaps -eq 0 ]] && is_restic_repo "$vps_path"; then
+                    vps_snaps=$(ls -1 "$vps_path/snapshots" 2>/dev/null | wc -l)
+                fi
+                local vps_last
+                vps_last=$(get_last_activity "$vps_path")
+
+                output+="$(printf '  %-20s  %-8s  %-6s  %s\n' "$vps_name" "$vps_size" "$vps_snaps" "$vps_last")\n"
+                vps_found=true
+            done
+
+            if ! $vps_found; then
+                output+="  (no VPS directories found)\n"
+            fi
+        fi
+    else
+        output+="  Data directory not found\n"
+    fi
+
+    # Recovery metadata
+    local meta_dir="${data_dir}/_meta"
+    output+="\n"
+    output+="RECOVERY METADATA\n"
+    if [[ -d "$meta_dir" ]]; then
+        for vps_meta in "$meta_dir"/*/; do
+            [[ -d "$vps_meta" ]] || continue
+            local vps_id
+            vps_id=$(basename "$vps_meta")
+            local has_password="no"
+            local has_config="no"
+            local has_key="no"
+            if [[ -f "$vps_meta/restic-password" ]]; then has_password="yes"; fi
+            if [[ -f "$vps_meta/backup-agent.conf" ]]; then has_config="yes"; fi
+            if [[ -f "$vps_meta/ssh-public-key.pub" ]]; then has_key="yes"; fi
+            local meta_age
+            meta_age=$(get_last_activity "$vps_meta")
+            output+="  ${vps_id}: password=${has_password} config=${has_config} ssh-key=${has_key} (updated: ${meta_age})\n"
+        done
+    else
+        output+="  No recovery metadata synced yet.\n"
+        output+="  (VPS agents v1.5.1+ sync automatically after each backup)\n"
+    fi
+
+    msg_scroll "Client: ${choice}" "$(echo -e "$output")"
+}
+
+# ──────────────────────────────────────────────
 # Storage breakdown
 # ──────────────────────────────────────────────
 show_storage() {
@@ -1155,6 +1462,240 @@ show_storage() {
 _clear_size_cache() {
     rm -rf "${SIZE_CACHE_DIR:?}"/*
     msg_box "Cache" "Size cache cleared. Next storage view will recompute all sizes."
+}
+
+# ──────────────────────────────────────────────
+# Report export (non-interactive)
+# ──────────────────────────────────────────────
+generate_report() {
+    local format="${1:-text}"
+    local now
+    now=$(date +%s)
+    local now_human
+    now_human=$(date '+%Y-%m-%d %H:%M:%S')
+    local stale_secs=$(( STALE_THRESHOLD_DAYS * 86400 ))
+    local version
+    version=$(cat /usr/local/lib/computile-gateway/VERSION 2>/dev/null || echo "dev")
+
+    if [[ "$format" == "json" ]]; then
+        _generate_report_json "$now" "$stale_secs" "$now_human" "$version"
+    else
+        _generate_report_text "$now" "$stale_secs" "$now_human" "$version"
+    fi
+}
+
+_generate_report_text() {
+    local now="$1" stale_secs="$2" now_human="$3" version="$4"
+
+    echo "=============================================="
+    echo "  COMPUTILE BACKUP GATEWAY - HEALTH REPORT"
+    echo "=============================================="
+    echo "Generated: ${now_human}"
+    echo "Gateway version: v${version}"
+    echo
+
+    # System health summary
+    echo "SYSTEM HEALTH"
+    echo "----------------------------------------------"
+
+    # SMB mount
+    if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
+        echo "  SMB Mount:    OK (mounted at ${BACKUP_BASE})"
+        df -h "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {printf "  Storage:      %s used / %s total (%s available)\n", $3, $2, $4}'
+    else
+        echo "  SMB Mount:    FAIL (not mounted)"
+    fi
+
+    # SSH
+    if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then
+        echo "  SSH Service:  OK"
+    else
+        echo "  SSH Service:  FAIL (not running)"
+    fi
+
+    # fail2ban
+    if systemctl is-active fail2ban &>/dev/null; then
+        local banned
+        banned=$(fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $NF}') || banned="?"
+        echo "  Fail2ban:     OK (${banned} banned IPs)"
+    else
+        echo "  Fail2ban:     FAIL (not running)"
+    fi
+
+    # Tailscale
+    if command -v tailscale &>/dev/null; then
+        local ts_self
+        ts_self=$(tailscale status --self 2>/dev/null | awk '{print $1}') || ts_self="?"
+        local ts_peers
+        ts_peers=$(tailscale status 2>/dev/null | wc -l) || ts_peers="?"
+        echo "  Tailscale:    OK (${ts_self}, ${ts_peers} peers)"
+    else
+        echo "  Tailscale:    N/A (not installed)"
+    fi
+
+    echo
+
+    # Client overview
+    echo "CLIENT STATUS"
+    echo "----------------------------------------------"
+    printf "  %-24s  %-6s  %-18s  %s\n" "CLIENT" "SNAPS" "LAST ACTIVITY" "STATUS"
+    printf "  %-24s  %-6s  %-18s  %s\n" "------------------------" "------" "------------------" "------"
+
+    local total_clients=0
+    local stale_clients=0
+    local active_clients=0
+    local alert_details=""
+
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        ((total_clients++)) || true
+
+        local display="${client#backup-}"
+        local data_dir="${BACKUP_BASE}/${client}/data"
+        local snaps=0
+        local last_activity="never"
+        local last_epoch=""
+        local status="OK"
+
+        if [[ -d "$data_dir" ]]; then
+            snaps=$(count_snapshots "$data_dir")
+            last_activity=$(get_last_activity "$data_dir")
+            last_epoch=$(get_last_activity_epoch "$data_dir")
+        fi
+
+        if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
+            status="EMPTY"
+            ((stale_clients++)) || true
+            alert_details+="  ALERT: ${display} - no backup data\n"
+        elif [[ $(( now - last_epoch )) -gt $(( stale_secs * 3 )) ]]; then
+            local age_days=$(( (now - last_epoch) / 86400 ))
+            status="ALERT"
+            ((stale_clients++)) || true
+            alert_details+="  ALERT: ${display} - last backup ${age_days}d ago\n"
+        elif [[ $(( now - last_epoch )) -gt $stale_secs ]]; then
+            local age_days=$(( (now - last_epoch) / 86400 ))
+            status="STALE"
+            ((stale_clients++)) || true
+            alert_details+="  WARN:  ${display} - last backup ${age_days}d ago\n"
+        else
+            ((active_clients++)) || true
+        fi
+
+        printf "  %-24s  %-6s  %-18s  %s\n" "$display" "$snaps" "$last_activity" "$status"
+    done < <(list_clients)
+
+    echo
+    echo "SUMMARY"
+    echo "----------------------------------------------"
+    echo "  Total clients:  ${total_clients}"
+    echo "  Active:         ${active_clients}"
+    echo "  Stale/alert:    ${stale_clients}"
+
+    if [[ -n "$alert_details" ]]; then
+        echo
+        echo "ALERTS"
+        echo "----------------------------------------------"
+        echo -e "$alert_details"
+    fi
+
+    # Active locks
+    local locks_output=""
+    for client_dir in "${BACKUP_BASE}"/backup-*/data; do
+        [[ -d "$client_dir" ]] || continue
+        local client_name
+        client_name=$(basename "$(dirname "$client_dir")")
+        for lockdir in "$client_dir"/locks "$client_dir"/*/locks; do
+            [[ -d "$lockdir" ]] || continue
+            for lock in "$lockdir"/*; do
+                [[ -f "$lock" ]] || continue
+                local lock_epoch
+                lock_epoch=$(stat -c '%Y' "$lock" 2>/dev/null || echo "0")
+                local age_mins=$(( (now - lock_epoch) / 60 ))
+                local stale_marker=""
+                if [[ $age_mins -gt 60 ]]; then stale_marker=" [STALE]"; fi
+                locks_output+="  ${client_name#backup-}: $(basename "$lock") (${age_mins}min)${stale_marker}\n"
+            done
+        done
+    done
+
+    if [[ -n "$locks_output" ]]; then
+        echo "ACTIVE LOCKS"
+        echo "----------------------------------------------"
+        echo -e "$locks_output"
+    fi
+
+    echo "=============================================="
+}
+
+_generate_report_json() {
+    local now="$1" stale_secs="$2" now_human="$3" version="$4"
+
+    local smb_ok="false"
+    if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then smb_ok="true"; fi
+
+    local ssh_ok="false"
+    if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then ssh_ok="true"; fi
+
+    local f2b_ok="false"
+    local f2b_banned=0
+    if systemctl is-active fail2ban &>/dev/null; then
+        f2b_ok="true"
+        f2b_banned=$(fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $NF}') || f2b_banned=0
+    fi
+
+    local disk_total="" disk_used="" disk_avail=""
+    if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
+        disk_total=$(df -B1 "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {print $2}') || true
+        disk_used=$(df -B1 "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {print $3}') || true
+        disk_avail=$(df -B1 "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {print $4}') || true
+    fi
+
+    # Build clients array
+    local clients_json=""
+    local first_client=true
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        local data_dir="${BACKUP_BASE}/${client}/data"
+        local snaps=0
+        local last_epoch=0
+        local status="ok"
+
+        if [[ -d "$data_dir" ]]; then
+            snaps=$(count_snapshots "$data_dir")
+            last_epoch=$(get_last_activity_epoch "$data_dir")
+        fi
+
+        if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
+            status="empty"
+        elif [[ $(( now - last_epoch )) -gt $(( stale_secs * 3 )) ]]; then
+            status="alert"
+        elif [[ $(( now - last_epoch )) -gt $stale_secs ]]; then
+            status="stale"
+        fi
+
+        if ! $first_client; then clients_json+=","; fi
+        first_client=false
+        clients_json+="{\"name\":\"${display}\",\"snapshots\":${snaps},\"last_activity_epoch\":${last_epoch},\"status\":\"${status}\"}"
+    done < <(list_clients)
+
+    cat <<ENDJSON
+{
+  "generated_at": "${now_human}",
+  "generated_epoch": ${now},
+  "gateway_version": "${version}",
+  "system": {
+    "smb_mounted": ${smb_ok},
+    "ssh_running": ${ssh_ok},
+    "fail2ban_running": ${f2b_ok},
+    "fail2ban_banned": ${f2b_banned},
+    "disk_total_bytes": ${disk_total:-0},
+    "disk_used_bytes": ${disk_used:-0},
+    "disk_available_bytes": ${disk_avail:-0}
+  },
+  "clients": [${clients_json}]
+}
+ENDJSON
 }
 
 # ──────────────────────────────────────────────
@@ -1248,11 +1789,14 @@ main_menu() {
             --menu "Select an operation:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
             "overview"   "Client overview (all clients)" \
             "client"     "Inspect a specific client" \
+            "search"     "Search client by name" \
             "sessions"   "Active SFTP sessions & locks" \
             "alerts"     "Stale backup alerts" \
+            "sftp-test"  "Test SFTP setup for a client" \
             "storage"    "Storage breakdown (sizes cached 1h)" \
             "clearcache" "Refresh size cache" \
             "health"     "System health (SMB, SSH, fail2ban)" \
+            "tailscale"  "Tailscale peers (online/offline)" \
             "fail2ban"   "Fail2ban: view/unban IPs" \
             "logs"       "View auth logs" \
             "users"      "User management" \
@@ -1260,17 +1804,20 @@ main_menu() {
             3>&1 1>&2 2>&3) || break
 
         case "$choice" in
-            overview) show_overview ;;
-            client)   show_client_detail ;;
-            sessions) show_active_sessions ;;
-            alerts)   show_stale_alerts ;;
+            overview)   show_overview ;;
+            client)     show_client_detail ;;
+            search)     search_client ;;
+            sessions)   show_active_sessions ;;
+            alerts)     show_stale_alerts ;;
+            sftp-test)  test_sftp_client ;;
             storage)    show_storage ;;
             clearcache) _clear_size_cache ;;
             health)     show_system_health ;;
-            fail2ban) manage_fail2ban ;;
-            logs)     show_auth_logs ;;
-            users)    manage_users ;;
-            quit|"")  break ;;
+            tailscale)  show_tailscale_peers ;;
+            fail2ban)   manage_fail2ban ;;
+            logs)       show_auth_logs ;;
+            users)      manage_users ;;
+            quit|"")    break ;;
         esac
     done
 }
@@ -1290,30 +1837,50 @@ case "${1:-}" in
         check_alerts_cli
         exit $?
         ;;
+    --report)
+        # Full health report (text or JSON)
+        generate_report "${2:-text}"
+        exit 0
+        ;;
+    --report-json)
+        generate_report "json"
+        exit 0
+        ;;
     --help|-h)
         cat <<'HELP'
 computile-gateway-manager — TUI manager for the backup gateway
 
 Usage:
-  sudo computile-gateway-manager              # Interactive TUI
-  sudo computile-gateway-manager --check-alerts  # Non-interactive alert check (for cron)
+  sudo computile-gateway-manager                 # Interactive TUI
+  sudo computile-gateway-manager --check-alerts   # Non-interactive alert check (for cron)
+  sudo computile-gateway-manager --report         # Full health report (text)
+  sudo computile-gateway-manager --report json    # Full health report (JSON)
+  sudo computile-gateway-manager --report-json    # Full health report (JSON, shorthand)
 
 Interactive features:
-  - Client overview: all clients, sizes, snapshot counts, last activity
-  - Per-client detail: VPS directories, storage breakdown
-  - Active SFTP sessions and restic locks
+  - Client overview: all clients, snapshot counts, last activity
+  - Per-client detail: VPS directories, storage breakdown, recovery metadata
+  - Client search by name
+  - Active SFTP sessions, restic locks, stale lock removal
   - Stale backup alerting (configurable threshold)
-  - Storage analysis per client
+  - SFTP connectivity test per client
+  - Storage analysis per client (cached 1h)
   - System health: SMB mount, SSH, fail2ban, Tailscale
-  - User management: create, remove, view SSH keys
+  - Tailscale peers overview (online/offline status)
+  - Fail2ban management: view, unban IP, unban all
+  - User management: create, remove, view/add SSH keys
   - Auth log viewer
 
-Non-interactive (--check-alerts):
-  Prints alerts for stale/missing backups and exits with code 1
-  if any alerts are found. Suitable for cron + email alerting.
+Non-interactive modes:
+  --check-alerts    Prints alerts for stale/missing backups, exits 1 if any
+  --report          Full health report (text format, to stdout)
+  --report json     Full health report (JSON format)
+  --report-json     Shorthand for --report json
 
-Example cron entry:
+Examples:
   0 8 * * * /usr/local/bin/computile-gateway-manager --check-alerts || mail -s "Backup alerts" admin@example.com
+  computile-gateway-manager --report > /tmp/gateway-report.txt
+  computile-gateway-manager --report-json | curl -X POST -d @- https://monitoring.example.com/api/gateway
 HELP
         exit 0
         ;;
