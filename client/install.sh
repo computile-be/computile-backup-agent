@@ -811,14 +811,16 @@ _update_config() {
         return 0
     fi
 
-    # Extract variable names from both files (ignoring comments and arrays)
-    # Pattern: lines starting with VARNAME= (not commented out)
+    # Extract variable names from both files (including commented-out ones)
     local -a example_vars=()
     local -a config_vars=()
 
     while IFS= read -r line; do
-        # Match uncommented variable assignments: VAR_NAME="..." or VAR_NAME=value
+        # Match active variable assignments: VAR_NAME="..." or VAR_NAME=value
         if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+            example_vars+=("${BASH_REMATCH[1]}")
+        # Also match commented-out variables: # VAR_NAME="..."
+        elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
             example_vars+=("${BASH_REMATCH[1]}")
         fi
     done < "$example_file"
@@ -826,9 +828,8 @@ _update_config() {
     while IFS= read -r line; do
         if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
             config_vars+=("${BASH_REMATCH[1]}")
-        fi
         # Also detect commented-out vars (user chose to leave them commented)
-        if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
+        elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*([A-Z_][A-Z0-9_]*)= ]]; then
             config_vars+=("${BASH_REMATCH[1]}")
         fi
     done < "$config_file"
