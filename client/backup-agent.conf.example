@@ -15,7 +15,7 @@ ROLE="coolify"              # coolify, forge, hybrid, docker, bare
 # ──────────────────────────────────────────────
 # Restic repository (via SFTP over Tailscale)
 # ──────────────────────────────────────────────
-RESTIC_REPOSITORY="sftp:backup-${CLIENT_ID}@backup-gateway:/data/${HOST_ID}"
+RESTIC_REPOSITORY="sftp:backup-${CLIENT_ID}@backup-gateway:/srv/backups/backup-${CLIENT_ID}/data/${HOST_ID}"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 # RESTIC_CACHE_DIR="/var/cache/restic"
 
