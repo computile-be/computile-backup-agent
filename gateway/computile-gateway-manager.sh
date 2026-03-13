@@ -18,10 +18,10 @@ TERM_LINES=$(tput lines 2>/dev/null || echo 24)
 TERM_COLS=$(tput cols 2>/dev/null || echo 80)
 WT_HEIGHT=$(( TERM_LINES - 4 ))
 WT_WIDTH=$(( TERM_COLS - 10 ))
-[[ $WT_HEIGHT -gt 40 ]] && WT_HEIGHT=40
-[[ $WT_WIDTH -gt 100 ]] && WT_WIDTH=100
-[[ $WT_HEIGHT -lt 20 ]] && WT_HEIGHT=20
-[[ $WT_WIDTH -lt 60 ]] && WT_WIDTH=60
+if [[ $WT_HEIGHT -gt 40 ]]; then WT_HEIGHT=40; fi
+if [[ $WT_WIDTH -gt 100 ]]; then WT_WIDTH=100; fi
+if [[ $WT_HEIGHT -lt 20 ]]; then WT_HEIGHT=20; fi
+if [[ $WT_WIDTH -lt 60 ]]; then WT_WIDTH=60; fi
 WT_LIST_HEIGHT=$(( WT_HEIGHT - 8 ))
 
 # ──────────────────────────────────────────────

@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.1] - 2026-03-14
+
+### Fixed
+- Gateway manager failed to launch silently due to `set -e` + `[[ ]] && ...` pattern at top-level — conditional terminal dimension clamping caused immediate exit when conditions were false
+
 ## [1.6.0] - 2026-03-14
 
 ### Added
