@@ -217,7 +217,7 @@ show_overview() {
 
     output+="CLIENT OVERVIEW\n"
     output+="$(printf '%-24s  %-8s  %-6s  %-18s  %s\n' 'CLIENT' 'SIZE' 'SNAPS' 'LAST ACTIVITY' 'STATUS')\n"
-    output+="$(printf '%0.s─' {1..80})\n"
+    output+="$(printf '%0.s-' {1..80})\n"
 
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
@@ -311,7 +311,7 @@ show_client_detail() {
 
     local output=""
     output+="CLIENT: ${choice}\n"
-    output+="$(printf '%0.s─' {1..60})\n"
+    output+="$(printf '%0.s-' {1..60})\n"
     output+="  User:      ${username}\n"
     output+="  Directory: ${client_dir}\n"
     output+="  Total size: $(get_size "$client_dir")\n"
@@ -342,7 +342,7 @@ show_client_detail() {
             # VPS subdirectories
             output+="VPS DIRECTORIES\n"
             output+="$(printf '  %-20s  %-8s  %-6s  %s\n' 'VPS' 'SIZE' 'SNAPS' 'LAST ACTIVITY')\n"
-            output+="  $(printf '%0.s─' {1..64})\n"
+            output+="  $(printf '%0.s-' {1..64})\n"
 
             local vps_found=false
             for vps_path in "$data_dir"/*/; do
@@ -417,7 +417,7 @@ show_client_detail() {
 show_active_sessions() {
     local output=""
     output+="ACTIVE SFTP SESSIONS\n"
-    output+="$(printf '%0.s─' {1..70})\n\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
 
     # Method 1: sftp-server processes
     local sftp_procs
@@ -495,7 +495,7 @@ show_stale_alerts() {
 
     output+="BACKUP FRESHNESS CHECK\n"
     output+="Threshold: ${STALE_THRESHOLD_DAYS} day(s)\n"
-    output+="$(printf '%0.s─' {1..70})\n\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
 
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
@@ -534,7 +534,7 @@ show_stale_alerts() {
         fi
     done < <(list_clients)
 
-    output+="\n$(printf '%0.s─' {1..70})\n"
+    output+="\n$(printf '%0.s-' {1..70})\n"
     if [[ $alerts -gt 0 ]]; then
         output+="RESULT: ${alerts} alert(s), ${warnings} warning(s) — action required\n"
     elif [[ $warnings -gt 0 ]]; then
@@ -667,7 +667,7 @@ show_user_list() {
     local output=""
     output+="BACKUP USERS\n"
     output+="$(printf '%-20s  %-12s  %-8s  %s\n' 'USERNAME' 'CLIENT ID' 'KEYS' 'DIRECTORY')\n"
-    output+="$(printf '%0.s─' {1..70})\n"
+    output+="$(printf '%0.s-' {1..70})\n"
 
     while IFS= read -r client; do
         [[ -z "$client" ]] && continue
@@ -717,9 +717,9 @@ create_user_interactive() {
     if [[ -n "$vps_id" ]]; then args+=("--vps" "$vps_id"); fi
 
     clear
-    echo "════════════════════════════════════════════════"
+    echo "================================================"
     echo "  Creating backup user..."
-    echo "════════════════════════════════════════════════"
+    echo "================================================"
     echo
     bash "$create_script" "${args[@]}" || true
     echo
@@ -772,9 +772,9 @@ remove_user_interactive() {
     fi
 
     clear
-    echo "════════════════════════════════════════════════"
+    echo "================================================"
     echo "  Removing backup user: backup-${choice}"
-    echo "════════════════════════════════════════════════"
+    echo "================================================"
     echo
     local args=("$choice")
     $delete_data && args+=("--delete-data")
@@ -807,7 +807,7 @@ show_user_keys() {
     local output=""
     output+="SSH KEYS FOR: backup-${choice}\n"
     output+="File: ${auth_keys}\n"
-    output+="$(printf '%0.s─' {1..60})\n\n"
+    output+="$(printf '%0.s-' {1..60})\n\n"
 
     if [[ -f "$auth_keys" ]]; then
         local idx=0
@@ -845,7 +845,7 @@ show_storage() {
     local output=""
 
     output+="STORAGE OVERVIEW\n"
-    output+="$(printf '%0.s─' {1..70})\n\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
 
     # Overall
     if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
@@ -858,7 +858,7 @@ show_storage() {
     # Per-client breakdown sorted by size
     output+="PER-CLIENT USAGE (sorted by size)\n"
     output+="$(printf '  %-24s  %s\n' 'CLIENT' 'SIZE')\n"
-    output+="  $(printf '%0.s─' {1..40})\n"
+    output+="  $(printf '%0.s-' {1..40})\n"
 
     # Collect sizes and sort
     local tmpfile
@@ -933,7 +933,7 @@ check_alerts_cli() {
 show_auth_logs() {
     local output=""
     output+="RECENT SFTP AUTH LOGS (last 50 backup-related entries)\n"
-    output+="$(printf '%0.s─' {1..70})\n\n"
+    output+="$(printf '%0.s-' {1..70})\n\n"
 
     local logs
     logs=$(grep 'backup-' /var/log/auth.log 2>/dev/null | tail -50) || true
