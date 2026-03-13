@@ -106,22 +106,22 @@ restic_backup() {
         return 0
     fi
 
-    local output
     local rc=0
-    output=$(restic backup \
-        "${tags[@]}" \
-        "${exclude_opts[@]}" \
-        --verbose \
-        "${backup_paths[@]}" 2>&1) || rc=$?
 
-    # Log output
-    while IFS= read -r line; do
-        if [[ $rc -ne 0 ]]; then
-            log_error "  restic: $line"
-        else
-            log_info "  restic: $line"
-        fi
-    done <<< "$output"
+    # Stream output in real-time (progress bar visible) and capture for logging
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        restic backup \
+            "${tags[@]}" \
+            "${exclude_opts[@]}" \
+            --verbose \
+            "${backup_paths[@]}" 2>&1 | tee -a "$LOG_FILE" || rc=${PIPESTATUS[0]}
+    else
+        restic backup \
+            "${tags[@]}" \
+            "${exclude_opts[@]}" \
+            --verbose \
+            "${backup_paths[@]}" || rc=$?
+    fi
 
     if [[ $rc -ne 0 ]]; then
         log_error "Restic backup failed (exit code $rc)"
