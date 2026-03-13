@@ -189,6 +189,22 @@ EOF
 }
 
 # ──────────────────────────────────────────────
+# Install gateway manager
+# ──────────────────────────────────────────────
+install_gateway_manager() {
+    info "Installing gateway manager..."
+    local manager_src="${SCRIPT_DIR}/computile-gateway-manager.sh"
+    local manager_dest="/usr/local/bin/computile-gateway-manager"
+
+    if [[ -f "$manager_src" ]]; then
+        install -m 0755 "$manager_src" "$manager_dest"
+        info "Gateway manager installed: $manager_dest"
+    else
+        warn "Gateway manager script not found: $manager_src"
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Create directory structure
 # ──────────────────────────────────────────────
 setup_directories() {
@@ -214,6 +230,7 @@ main() {
     setup_smb_mount
     setup_ssh
     setup_fail2ban
+    install_gateway_manager
 
     echo
     echo "════════════════════════════════════════════════"
@@ -224,6 +241,7 @@ main() {
     echo "  2. Add SSH public keys for each VPS"
     echo "  3. Verify SMB mount:     df -h $BACKUP_BASE"
     echo "  4. Test SFTP access from a VPS"
+    echo "  5. Launch the gateway manager: computile-gateway-manager"
     echo "════════════════════════════════════════════════"
 }
 

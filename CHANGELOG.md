@@ -4,6 +4,21 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.0] - 2026-03-14
+
+### Added
+- **Gateway TUI manager** (`computile-gateway-manager`): interactive terminal UI for monitoring the backup gateway
+  - Client overview dashboard: all clients with sizes, snapshot counts, last activity, staleness status
+  - Per-client detail view: VPS directories, storage breakdown, SSH keys
+  - Active SFTP sessions and restic lock file monitoring
+  - Stale backup alerting with configurable threshold (default: 2 days)
+  - Storage analysis per client (sorted by size)
+  - System health checks: SMB mount, SSH service, fail2ban, Tailscale
+  - User management: create, remove, view SSH keys
+  - Auth log viewer (backup-related entries)
+  - Non-interactive `--check-alerts` mode for cron integration
+- `setup_gateway.sh` now installs the gateway manager to `/usr/local/bin/computile-gateway-manager`
+
 ## [1.4.0] - 2026-03-13
 
 ### Added
