@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.3] - 2026-03-14
+
+### Fixed
+- **Source repo discovery**: gateway manager now searches `/srv/computile-backup-agent` in addition to `/opt/computile-backup-agent` as fallback, and resolves `.source-repo` properly — fixes self-update, create-user, and remove-user when the repo is not at the default path
+
 ## [1.8.2] - 2026-03-14
 
 ### Fixed

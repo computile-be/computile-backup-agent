@@ -82,6 +82,30 @@ yesno() {
     $DIALOG --title "$1" --yesno "$2" 10 $WT_WIDTH
 }
 
+# Find the source git repo for this project
+# Checks .source-repo, then common install paths
+_find_source_repo() {
+    local repo=""
+    # 1. Saved path from setup_gateway.sh
+    if [[ -f /usr/local/lib/computile-gateway/.source-repo ]]; then
+        repo=$(head -1 /usr/local/lib/computile-gateway/.source-repo 2>/dev/null)
+    fi
+    # 2. Resolve relative paths (setup writes "SCRIPT_DIR/..")
+    if [[ -n "$repo" ]] && [[ -d "$repo" ]]; then
+        repo=$(cd "$repo" && pwd)
+    fi
+    # 3. Fallback: try common locations
+    if [[ -z "$repo" ]] || [[ ! -d "$repo/.git" ]]; then
+        for candidate in /srv/computile-backup-agent /opt/computile-backup-agent; do
+            if [[ -d "$candidate/.git" ]]; then
+                repo="$candidate"
+                break
+            fi
+        done
+    fi
+    echo "$repo"
+}
+
 # ──────────────────────────────────────────────
 # Data collection helpers
 # ──────────────────────────────────────────────
@@ -852,7 +876,9 @@ create_user_interactive() {
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         create_script="${script_dir}/create_backup_user.sh"
         if [[ ! -f "$create_script" ]]; then
-            create_script="/opt/computile-backup-agent/gateway/create_backup_user.sh"
+            local src_repo
+            src_repo=$(_find_source_repo)
+            [[ -n "$src_repo" ]] && create_script="${src_repo}/gateway/create_backup_user.sh"
         fi
     fi
 
@@ -896,7 +922,9 @@ remove_user_interactive() {
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         remove_script="${script_dir}/remove_backup_user.sh"
         if [[ ! -f "$remove_script" ]]; then
-            remove_script="/opt/computile-backup-agent/gateway/remove_backup_user.sh"
+            local src_repo
+            src_repo=$(_find_source_repo)
+            [[ -n "$src_repo" ]] && remove_script="${src_repo}/gateway/remove_backup_user.sh"
         fi
     fi
 
@@ -1578,13 +1606,8 @@ _clear_size_cache() {
 # ──────────────────────────────────────────────
 self_update() {
     # Find the source repo
-    local source_repo=""
-    if [[ -f /usr/local/lib/computile-gateway/.source-repo ]]; then
-        source_repo=$(cat /usr/local/lib/computile-gateway/.source-repo 2>/dev/null | head -1)
-    fi
-    if [[ -z "$source_repo" ]] || [[ ! -d "$source_repo" ]]; then
-        source_repo="/opt/computile-backup-agent"
-    fi
+    local source_repo
+    source_repo=$(_find_source_repo)
 
     if [[ ! -d "$source_repo/.git" ]]; then
         msg_box "Update" "Cannot find source repository.\n\nExpected at: ${source_repo}\n\nClone the repo first:\n  git clone https://github.com/computile-be/computile-backup-agent.git ${source_repo}"
