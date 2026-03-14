@@ -1663,8 +1663,7 @@ phase2_restore_files() {
     log_info "Installing prerequisites on target..."
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo"
-    local prereqs="gzip curl"
-    [[ "$USE_STREAMING" != true ]] && prereqs+=" rsync"
+    local prereqs="gzip curl rsync"
     if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs}" &>/dev/null; then
         report_ok "Target prerequisites installed"
     else
@@ -1989,8 +1988,12 @@ phase3_platform() {
     fi
 
     # Step 2: Install Coolify on target (generates new APP_KEY)
+    # Must run as root; pipe through sudo bash to ensure elevated privileges.
+    # Use bash -e so any failure inside the install script propagates.
     log_info "Installing Coolify on target..."
-    if _ssh_target "curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash" 2>&1; then
+    local _sudo_coolify=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_coolify="sudo "
+    if _ssh_target "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
         report_ok "Coolify installed on target"
     else
         report_ko "Coolify installation failed"
@@ -2007,7 +2010,7 @@ phase3_platform() {
 
     # Step 4: Stop Coolify containers
     log_info "Stopping Coolify containers..."
-    _ssh_target "docker stop coolify coolify-redis coolify-realtime coolify-proxy coolify-db 2>/dev/null || true"
+    _ssh_target "${_sudo_coolify}docker stop coolify coolify-redis coolify-realtime coolify-proxy coolify-db 2>/dev/null || true"
     report_ok "Coolify containers stopped"
 
     # Step 5: Restore Coolify SSH keys (excluded from Phase 2 rsync to protect SSH)
@@ -2024,15 +2027,16 @@ phase3_platform() {
             local rsync_rsh
             rsync_rsh=$(_rsync_ssh_cmd)
             rsync -az -e "$rsync_rsh" \
+                --rsync-path="${_sudo_coolify}rsync" \
                 "${ssh_temp}/data/coolify/ssh/" "${SSH_USER}@${TARGET}:/data/coolify/ssh/" 2>&1
 
             # Fix SSH key permissions
-            _ssh_target "
+            _ssh_target "${_sudo_coolify}bash -c '
                 if [[ -d /data/coolify/ssh/keys ]]; then
                     chown -R root:root /data/coolify/ssh/keys/
                     chmod 600 /data/coolify/ssh/keys/* 2>/dev/null || true
                 fi
-            "
+            '"
 
             local key_count
             key_count=$(_ssh_target "ls /data/coolify/ssh/keys/ 2>/dev/null | wc -l" || echo "0")
@@ -2062,7 +2066,7 @@ phase3_platform() {
 
     # Step 7: Restart Coolify
     log_info "Restarting Coolify..."
-    if _ssh_target "curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash" 2>&1; then
+    if _ssh_target "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
         report_ok "Coolify restarted"
     else
         report_ko "Coolify restart failed"
@@ -2072,7 +2076,7 @@ phase3_platform() {
     log_info "Waiting for Coolify containers to start..."
     local waited=0
     while [[ $waited -lt 60 ]]; do
-        if _ssh_target "docker ps --filter name=coolify --format '{{.Names}}' 2>/dev/null | grep -q '^coolify$'"; then
+        if _ssh_target "${_sudo_coolify}docker ps --filter name=coolify --format '{{.Names}}' 2>/dev/null | grep -q '^coolify$'"; then
             break
         fi
         sleep 5
@@ -2371,8 +2375,10 @@ phase5_verify() {
         return 0
     fi
 
-    # Check Docker
-    if _ssh_target "docker info" &>/dev/null; then
+    # Check Docker (may need sudo if SSH user is not in docker group)
+    local _sudo_v=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_v="sudo "
+    if _ssh_target "${_sudo_v}docker info" &>/dev/null; then
         report_ok "Docker running"
     else
         report_ko "Docker not running"
@@ -2392,12 +2398,15 @@ phase5_verify() {
 }
 
 _verify_coolify() {
+    local _sudo_vc=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_vc="sudo "
+
     # Check Coolify core containers
     local coolify_containers=("coolify" "coolify-db" "coolify-redis" "coolify-realtime" "coolify-proxy")
 
     for cname in "${coolify_containers[@]}"; do
         local status
-        status=$(_ssh_target "docker ps --filter name='^${cname}$' --format '{{.Status}}'" 2>/dev/null || true)
+        status=$(_ssh_target "${_sudo_vc}docker ps --filter name='^${cname}$' --format '{{.Status}}'" 2>/dev/null || true)
         if [[ "$status" == *"Up"* ]]; then
             report_ok "${cname}: UP"
         else
