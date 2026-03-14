@@ -4,13 +4,18 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.28.1] - 2026-03-14
+## [1.29.0] - 2026-03-14
 
 ### Added
 - **Restore test**: `--no-streaming` flag to force extract+rsync mode (useful for performance comparison)
+- **Restore test**: transfer mode selector in interactive TUI (streaming vs extract+rsync)
+- **Restore test**: SSH watchdog for extract+rsync mode — saves SSH user identity before restore, deploys a background process on the target that re-injects the user if `/etc/passwd` gets overwritten by rsync. Ensures complete `/etc` restore without losing SSH connectivity
 
 ### Changed
 - **Restore test**: progress logs now show segment speed (last 15s) alongside cumulative average (e.g. `6.7 MB/s, avg 16.8 MB/s`)
+
+### Fixed
+- **Restore test**: extract+rsync mode no longer breaks SSH by overwriting `/etc/passwd` and host keys
 
 ## [1.28.0] - 2026-03-14
 
