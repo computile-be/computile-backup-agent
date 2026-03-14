@@ -1507,12 +1507,13 @@ phase2_restore_files() {
     [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
     # Exclude SSH config to avoid breaking the active connection
     # Also exclude Coolify SSH keys — they will be handled in Phase 3
+    # Exclusions use paths relative to the transfer root (no leading /)
     rsync_opts+=(
-        --exclude='/etc/ssh/'
-        --exclude='/home/*/.ssh/authorized_keys'
-        --exclude='/root/.ssh/authorized_keys'
-        --exclude='/data/coolify/ssh/keys/'
-        --exclude='/data/coolify/ssh/id.*'
+        --exclude='etc/ssh/'
+        --exclude='home/*/.ssh/authorized_keys'
+        --exclude='root/.ssh/authorized_keys'
+        --exclude='data/coolify/ssh/keys/'
+        --exclude='data/coolify/ssh/id.*'
     )
 
     # Restore and rsync each path individually to limit RAM usage
