@@ -404,9 +404,11 @@ _tui_ssh_key_check() {
     if [[ -z "$pub_key" ]]; then
         if _yesno "Restore Test — SSH Key" \
             "No SSH public key found on this gateway.\n\nGenerate one now? (ed25519, no passphrase)"; then
+            log_info "Generating SSH key..."
             ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "computile-gateway-restore" >/dev/null 2>&1
             pub_key=$(cat /root/.ssh/id_ed25519.pub)
             key_file="/root/.ssh/id_ed25519.pub"
+            log_info "SSH key generated: $key_file"
         else
             return 1
         fi
@@ -415,14 +417,19 @@ _tui_ssh_key_check() {
     # Show key info
     local fingerprint
     fingerprint=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $1, $2, $NF}') || fingerprint="N/A"
+    log_info "Gateway SSH key: $key_file"
+    log_info "  Fingerprint: $fingerprint"
 
     # Check if key is already authorized on target
+    log_info "Testing SSH connection to ${SSH_USER}@${TARGET}:${SSH_PORT}..."
     if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
         -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+        log_info "  -> SSH key already authorized on ${SSH_USER}@${TARGET}"
         _msg_box "Restore Test — SSH Key" \
-            "SSH key already authorized on ${SSH_USER}@${TARGET}.\n\nKey: ${key_file}\nFingerprint: ${fingerprint}"
+            "SSH key already authorized on ${SSH_USER}@${TARGET}.\n\nKey: ${key_file}\nFingerprint: ${fingerprint}\n\nConnection test: OK"
         return 0
     fi
+    log_info "  -> SSH key NOT yet authorized on target"
 
     # Offer to push key automatically via password
     local choice
@@ -435,7 +442,7 @@ _tui_ssh_key_check() {
 
     case "$choice" in
         password)
-            _push_ssh_key_via_password "$key_file"
+            _push_ssh_key_via_password "$key_file" "$fingerprint"
             ;;
         manual)
             local msg="Add this public key to ${SSH_USER}@${TARGET}:\n\n"
@@ -450,10 +457,13 @@ _tui_ssh_key_check() {
                 return 1
             fi
             # Verify it works now
+            log_info "Verifying SSH connection after manual key setup..."
             if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
                 -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+                log_info "  -> Connection verified OK"
                 _msg_box "Restore Test" "SSH key verified! Connection to ${SSH_USER}@${TARGET} is working."
             else
+                log_error "  -> Connection FAILED after manual key setup"
                 _msg_box "Restore Test" "SSH connection still failing. Check the key and try again."
                 return 1
             fi
@@ -463,14 +473,17 @@ _tui_ssh_key_check() {
 
 _push_ssh_key_via_password() {
     local key_file="$1"
+    local fingerprint="$2"
 
     # Check if sshpass is available, install if needed
     if ! command -v sshpass &>/dev/null; then
-        _msg_box "Installing sshpass" "Installing sshpass for password-based key copy..."
+        log_info "Installing sshpass..."
         if ! apt-get install -y -qq sshpass &>/dev/null; then
+            log_error "Failed to install sshpass"
             _msg_box "Restore Test" "Failed to install sshpass.\nInstall manually: apt install sshpass"
             return 1
         fi
+        log_info "  sshpass installed"
     fi
 
     local password
@@ -485,26 +498,36 @@ _push_ssh_key_via_password() {
     fi
 
     # Push key using ssh-copy-id
+    log_info "Copying SSH key to ${SSH_USER}@${TARGET}:${SSH_PORT}..."
     local output
     if output=$(sshpass -p "$password" ssh-copy-id \
         -o StrictHostKeyChecking=accept-new \
         -p "$SSH_PORT" \
         -i "$key_file" \
         "${SSH_USER}@${TARGET}" 2>&1); then
+        log_info "  -> ssh-copy-id succeeded"
         # Verify the connection actually works
+        log_info "Verifying SSH connection with key authentication..."
         if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
             -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
-            local fp
-            fp=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $1, $2, $NF}') || fp="N/A"
+            log_info "  -> Connection verified OK"
+            log_info "SSH key deployment complete:"
+            log_info "  Target:      ${SSH_USER}@${TARGET}:${SSH_PORT}"
+            log_info "  Key:         ${key_file}"
+            log_info "  Fingerprint: ${fingerprint}"
+            log_info "  Status:      OK"
             _msg_box "Restore Test — SSH Key Deployed" \
-                "SSH key successfully copied and verified!\n\nTarget: ${SSH_USER}@${TARGET}\nKey: ${key_file}\nFingerprint: ${fp}\n\nConnection test: OK"
+                "SSH key successfully copied and verified!\n\nTarget: ${SSH_USER}@${TARGET}\nKey: ${key_file}\nFingerprint: ${fingerprint}\n\nConnection test: OK"
         else
+            log_error "  -> Connection FAILED after ssh-copy-id"
             _msg_box "Restore Test — Warning" \
                 "ssh-copy-id succeeded but connection test failed.\nCheck the target's SSH configuration."
             return 1
         fi
         return 0
     else
+        log_error "  -> ssh-copy-id FAILED"
+        log_error "  Output: ${output}"
         _msg_box "Restore Test — Error" "Failed to copy SSH key:\n\n${output}\n\nCheck the password and try again."
         return 1
     fi

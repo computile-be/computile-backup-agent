@@ -4,6 +4,13 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.18.0] - 2026-03-14
+
+### Improved
+- **Restore test**: detailed console logging (`log_info`) at every SSH key step — connection test, key copy, verification — so progress is visible in the terminal behind the TUI dialogs
+- **Restore test**: explicit verification after `ssh-copy-id` with clear OK/FAILED status in both console and dialog
+- **Restore test**: pass fingerprint through to `_push_ssh_key_via_password` to avoid recalculating
+
 ## [1.17.0] - 2026-03-14
 
 ### Improved
