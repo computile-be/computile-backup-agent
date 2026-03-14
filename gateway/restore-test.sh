@@ -362,18 +362,41 @@ if $is_etc_restore; then
     fi
 
     mkdir -p /etc/sudoers.d 2>/dev/null || true
+    _ensure_nopasswd() {
+        local u="$1"
+        [ -n "$u" ] || return
+        grep -q "^${u}:" /etc/passwd 2>/dev/null || return
+        echo "${u} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${u}"
+        grep -q "Defaults:${u} !use_pty" "/etc/sudoers.d/${u}" 2>/dev/null || \
+            echo "Defaults:${u} !use_pty" >> "/etc/sudoers.d/${u}"
+        chmod 440 "/etc/sudoers.d/${u}"
+    }
+    # 1) Restore user (computile-restore)
     if [ -f "$SAVE_DIR/sudoers_file" ]; then
         cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
     else
-        echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${USERNAME}"
+        _ensure_nopasswd "$USERNAME"
     fi
-    # Debian 13+ uses Defaults use_pty; non-interactive SSH has no TTY → sudo fails.
-    # Override for restore user so Phase 3+ work when gateway runs ssh 'sudo cmd'.
     grep -q "Defaults:${USERNAME} !use_pty" "/etc/sudoers.d/${USERNAME}" 2>/dev/null || \
         echo "Defaults:${USERNAME} !use_pty" >> "/etc/sudoers.d/${USERNAME}"
     chmod 440 "/etc/sudoers.d/${USERNAME}"
-    # Debug trace — remove once verified
-    echo "[fixup] sudoers: is_etc=$is_etc_restore user=$USERNAME file=$(ls -la /etc/sudoers.d/${USERNAME} 2>&1)" >> /tmp/computile-fixup-debug.log
+    # 2) Any user whose authorized_keys has the gateway key — after /home restore,
+    #    the backup's main user (e.g. computile) may have it; sshd can auth as them.
+    for ak in /etc/ssh/authorized_keys/* 2>/dev/null; do
+        [ -f "$ak" ] || continue
+        grep -q "computile-gateway-restore" "$ak" 2>/dev/null || continue
+        u=$(basename "$ak")
+        [ "$u" = "$USERNAME" ] && continue
+        _ensure_nopasswd "$u"
+    done
+    for home in /root /home/*; do
+        [ -d "$home" ] || continue
+        [ -f "${home}/.ssh/authorized_keys" ] || continue
+        grep -q "computile-gateway-restore" "${home}/.ssh/authorized_keys" 2>/dev/null || continue
+        u=$(basename "$home")
+        [ "$u" = "$USERNAME" ] || [ "$u" = "root" ] && continue
+        _ensure_nopasswd "$u"
+    done
 
     # Restore PAM + nsswitch (critical for SSH session creation)
     if [ -d "$SAVE_DIR/pam" ]; then
