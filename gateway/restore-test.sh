@@ -300,8 +300,10 @@ _stream_path_to_target() {
 
     # Stream restic dump directly to target via SSH
     # restic dump outputs tar to stdout, SSH pipes it to remote tar extract
+    # Use Compression=no: restic output is already decompressed, SSH compression wastes CPU
     restic dump --archive tar --no-lock "$SNAPSHOT_ID" "$path" 2>/dev/null | \
-        _ssh_target "$remote_cmd" 2>&1 &
+        ssh $(_ssh_common_opts) -o Compression=no -o BatchMode=yes \
+            "${SSH_USER}@${TARGET}" "$remote_cmd" 2>&1 &
     local stream_pid=$!
 
     # Progress monitor: check remote disk usage every 15s
@@ -322,7 +324,11 @@ _stream_path_to_target() {
             [[ $pct -gt 100 ]] && pct=100
             pct_str=" (${pct}% of total)"
         fi
-        log_info "    ~$(_human_size $delta_bytes) written${pct_str}, $(_format_duration $elapsed) elapsed"
+        local speed_str=""
+        if [[ $elapsed -gt 0 && $delta_bytes -gt 0 ]]; then
+            speed_str=", $(_human_size $(( delta_bytes / elapsed )))/s"
+        fi
+        log_info "    ~$(_human_size $delta_bytes) written${pct_str}${speed_str}, $(_format_duration $elapsed) elapsed"
     done
 
     local stream_rc=0
@@ -366,6 +372,109 @@ _stream_path_to_target() {
         if [[ $target_avail_gb -lt 2 ]]; then
             log_warn "  Target disk space critically low: ${target_avail_gb} GB remaining"
             report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
+        fi
+    fi
+
+    return 0
+}
+
+# Stream entire snapshot to target in a single restic dump (no per-path overhead).
+# Each per-path dump has ~15s of tree-walk overhead; a single dump eliminates this.
+# Uses: restic dump --archive tar / | ssh tar xf -
+_stream_full_to_target() {
+    log_info "Streaming full snapshot to target (single dump, no local writes)..."
+
+    # Build tar exclusions (same as per-path streaming)
+    local tar_excludes=""
+    tar_excludes+=" --exclude='etc/ssh'"
+    tar_excludes+=" --exclude='home/*/.ssh/authorized_keys'"
+    tar_excludes+=" --exclude='root/.ssh/authorized_keys'"
+    tar_excludes+=" --exclude='data/coolify/ssh/keys'"
+    tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
+
+    # Build remote tar command (with sudo if non-root)
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
+    local remote_cmd="${_sudo}tar xf - -C / ${tar_excludes}"
+
+    # Get target disk usage before streaming (for transferred bytes estimate)
+    local before_used_kb
+    before_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
+
+    local stream_start
+    stream_start=$(date +%s)
+
+    # Single restic dump of entire snapshot — avoids repeated tree-walk overhead
+    # Compression=no: restic output is already decompressed, SSH compression wastes CPU
+    restic dump --archive tar --no-lock "$SNAPSHOT_ID" / 2>/dev/null | \
+        ssh $(_ssh_common_opts) -o Compression=no -o BatchMode=yes \
+            "${SSH_USER}@${TARGET}" "$remote_cmd" 2>&1 &
+    local stream_pid=$!
+
+    # Progress monitor: check remote disk usage every 15s
+    while kill -0 "$stream_pid" 2>/dev/null; do
+        sleep 15
+        if ! kill -0 "$stream_pid" 2>/dev/null; then
+            break
+        fi
+        local elapsed=$(( $(date +%s) - stream_start ))
+        local cur_used_kb
+        cur_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "$before_used_kb")
+        local delta_kb=$(( cur_used_kb - before_used_kb ))
+        if [[ $delta_kb -lt 0 ]]; then delta_kb=0; fi
+        local delta_bytes=$(( delta_kb * 1024 ))
+        local pct_str=""
+        if [[ $SNAPSHOT_TOTAL_BYTES -gt 0 && $delta_bytes -gt 0 ]]; then
+            local pct=$(( delta_bytes * 100 / SNAPSHOT_TOTAL_BYTES ))
+            [[ $pct -gt 100 ]] && pct=100
+            pct_str=" (${pct}% of total)"
+        fi
+        local speed_str=""
+        if [[ $elapsed -gt 0 && $delta_bytes -gt 0 ]]; then
+            speed_str=", $(_human_size $(( delta_bytes / elapsed )))/s"
+        fi
+        log_info "    ~$(_human_size $delta_bytes) written${pct_str}${speed_str}, $(_format_duration $elapsed) elapsed"
+    done
+
+    local stream_rc=0
+    wait "$stream_pid" || stream_rc=$?
+
+    local stream_end
+    stream_end=$(date +%s)
+    local duration=$((stream_end - stream_start))
+
+    if [[ $stream_rc -ne 0 ]]; then
+        log_error "Full snapshot streaming failed (exit code: $stream_rc)"
+        return $stream_rc
+    fi
+
+    # Calculate transferred bytes from disk usage delta
+    local after_used_kb
+    after_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "$before_used_kb")
+    total_restored_bytes=$(( (after_used_kb - before_used_kb) * 1024 ))
+    [[ $total_restored_bytes -lt 0 ]] && total_restored_bytes=0
+
+    local speed="N/A"
+    if [[ $duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
+        speed="$(_human_size $(( total_restored_bytes / duration )))/s"
+    fi
+    log_info "Full snapshot done: ~$(_human_size $total_restored_bytes) in $(_format_duration $duration) ($speed)"
+
+    # Verify SSH connectivity still works
+    if ! _ssh_target true 2>/dev/null; then
+        log_error "SSH connectivity lost after full snapshot streaming"
+        report_ko "SSH connectivity lost after full snapshot streaming"
+        return 1
+    fi
+
+    # Check target disk space
+    local target_avail_kb
+    target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
+    if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
+        local target_avail_gb=$((target_avail_kb / 1048576))
+        if [[ $target_avail_gb -lt 2 ]]; then
+            log_warn "Target disk space critically low: ${target_avail_gb} GB remaining"
+            report_warn "Target disk space low after restore: ${target_avail_gb} GB remaining"
         fi
     fi
 
@@ -1243,6 +1352,45 @@ phase2_restore_files() {
         report_warn "Could not install prerequisites (may already be present)"
     fi
 
+    # Get total snapshot size for progress percentage (with timeout to avoid OOM on huge repos)
+    SNAPSHOT_TOTAL_BYTES=0
+    log_info "Calculating snapshot size (timeout: 10s)..."
+    local stats_json
+    stats_json=$(timeout 10 restic stats --no-lock "$SNAPSHOT_ID" --json 2>/dev/null) || true
+    if [[ -n "$stats_json" ]]; then
+        SNAPSHOT_TOTAL_BYTES=$(echo "$stats_json" | grep -oP '"total_size":\s*\K[0-9]+' || echo "0")
+        log_info "Snapshot total size: $(_human_size "$SNAPSHOT_TOTAL_BYTES")"
+    else
+        log_warn "Could not determine snapshot size (restic stats timed out or failed) — progress percentage will not be shown"
+    fi
+
+    local restore_start
+    restore_start=$(date +%s)
+    local total_restored_bytes=0
+
+    # ── Streaming: try single full dump first (avoids ~15s overhead per path) ──
+    if [[ "$USE_STREAMING" == true ]]; then
+        log_info "Attempting single full-snapshot dump (eliminates per-path tree-walk overhead)..."
+        if _stream_full_to_target; then
+            # Success — skip per-path logic entirely
+            local restore_end
+            restore_end=$(date +%s)
+            local restore_duration=$((restore_end - restore_start))
+            local total_human
+            total_human=$(_human_size "$total_restored_bytes")
+            local avg_speed="N/A"
+            if [[ $restore_duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
+                avg_speed="$(_human_size $(( total_restored_bytes / restore_duration )))/s"
+            fi
+            log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
+            report_ok "Restore complete (streaming, single dump): ~${total_human} in $(_format_duration $restore_duration) (avg ${avg_speed})"
+            return 0
+        fi
+        log_warn "Single full dump failed — falling back to per-path streaming..."
+    fi
+
+    # ── Per-path fallback (streaming per-path or extract+rsync) ──
+
     # Get the list of paths in the snapshot
     log_info "Listing paths in snapshot '$SNAPSHOT_ID'..."
     local snapshot_paths
@@ -1300,18 +1448,6 @@ phase2_restore_files() {
     local total_paths=${#paths[@]}
     log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
 
-    # Get total snapshot size for progress percentage (with timeout to avoid OOM on huge repos)
-    SNAPSHOT_TOTAL_BYTES=0
-    log_info "Calculating snapshot size (timeout: 10s)..."
-    local stats_json
-    stats_json=$(timeout 10 restic stats --no-lock "$SNAPSHOT_ID" --json 2>/dev/null) || true
-    if [[ -n "$stats_json" ]]; then
-        SNAPSHOT_TOTAL_BYTES=$(echo "$stats_json" | grep -oP '"total_size":\s*\K[0-9]+' || echo "0")
-        log_info "Snapshot total size: $(_human_size "$SNAPSHOT_TOTAL_BYTES")"
-    else
-        log_warn "Could not determine snapshot size (restic stats timed out or failed) — progress percentage will not be shown"
-    fi
-
     # Sort paths: /data last to minimize risk of SSH breakage from Coolify files
     local -a sorted_paths=()
     local data_path=""
@@ -1342,9 +1478,6 @@ phase2_restore_files() {
     )
 
     # Restore and rsync each path individually to limit RAM usage
-    local restore_start
-    restore_start=$(date +%s)
-    local total_restored_bytes=0
     local path_idx=0
     local failed_paths=()
 

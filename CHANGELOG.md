@@ -9,6 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - **Restore test**: pre-flight RAM check — warns if target VM has less than 4 GB (recommend for Coolify restores) or less than 2 GB (risk of OOM/heavy swap)
 
+### Changed
+- **Restore test**: single full-snapshot dump — streams entire snapshot in one `restic dump` call instead of one per path, eliminating ~15s of tree-walk overhead per path (~60-90s saved on typical 7-path snapshots). Falls back to per-path streaming automatically if the full dump fails
+- **Restore test**: SSH `Compression=no` for streaming pipeline — avoids wasting CPU recompressing already-decompressed restic output
+- **Restore test**: progress logs now include average speed (e.g. `~655 MB written (14% of total), 4.8 MB/s, 30s elapsed`)
+
 ## [1.27.0] - 2026-03-14
 
 ### Added

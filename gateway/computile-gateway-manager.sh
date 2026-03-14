@@ -2451,7 +2451,12 @@ main_menu() {
         sftp_procs=$(get_sftp_sessions)
         if [[ -n "$sftp_procs" ]]; then sftp_count=$(echo "$sftp_procs" | wc -l); fi
 
-        local title="computile-backup Gateway — ${client_count} clients"
+        local gw_version=""
+        [[ -f /usr/local/lib/computile-gateway/VERSION ]] && gw_version=$(head -1 /usr/local/lib/computile-gateway/VERSION | tr -d '[:space:]')
+
+        local title="computile-backup Gateway"
+        [[ -n "$gw_version" ]] && title+=" v${gw_version}"
+        title+=" — ${client_count} clients"
         if [[ $sftp_count -gt 0 ]]; then title+=" — ${sftp_count} active"; fi
 
         local choice
