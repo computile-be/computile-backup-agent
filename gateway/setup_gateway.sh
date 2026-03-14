@@ -30,6 +30,9 @@ readonly INSTALL_LIB="/usr/local/lib/computile-gateway"
 UPDATE_MODE=false
 ROLLBACK_MODE=false
 FORCE_MODE=false
+SKIP_CRON=false
+
+readonly CRON_FILE="/etc/cron.d/computile-backup-monitor"
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -220,6 +223,33 @@ EOF
 }
 
 # ──────────────────────────────────────────────
+# Install monitoring cron job
+# ──────────────────────────────────────────────
+install_monitor_cron() {
+    if $SKIP_CRON; then
+        info "Skipping cron installation (--no-cron)"
+        return 0
+    fi
+
+    if [[ -f "$CRON_FILE" ]]; then
+        info "Monitor cron already exists: $CRON_FILE (not overwritten)"
+        return 0
+    fi
+
+    info "Installing monitoring cron job..."
+
+    cat > "$CRON_FILE" <<'EOF'
+# computile-backup gateway monitoring
+# Runs every 15 minutes, sends alerts via healthcheck/webhook if configured
+*/15 * * * * root /usr/local/bin/computile-gateway-manager --monitor 2>&1 | logger -t computile-gateway
+EOF
+    chmod 644 "$CRON_FILE"
+
+    info "Monitor cron installed: $CRON_FILE"
+    info "Configure GATEWAY_HEALTHCHECK_URL and/or GATEWAY_WEBHOOK_URL in /etc/computile-backup/gateway.conf to enable alerts"
+}
+
+# ──────────────────────────────────────────────
 # Install gateway scripts
 # ──────────────────────────────────────────────
 install_gateway_scripts() {
@@ -383,6 +413,9 @@ update_gateway() {
     # Update scripts
     install_gateway_scripts
 
+    # Install cron if not already present
+    install_monitor_cron
+
     # Verify
     if [[ -f "${INSTALL_LIB}/VERSION" ]]; then
         local verify_version
@@ -469,6 +502,10 @@ parse_args() {
                 FORCE_MODE=true
                 shift
                 ;;
+            --no-cron)
+                SKIP_CRON=true
+                shift
+                ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo
@@ -476,6 +513,7 @@ parse_args() {
                 echo "  --update     Update gateway scripts (preserves config)"
                 echo "  --rollback   Rollback to previous version"
                 echo "  --force      Force update even if version matches"
+                echo "  --no-cron    Skip monitoring cron job installation"
                 echo "  --help, -h   Show this help"
                 exit 0
                 ;;
@@ -517,6 +555,7 @@ main() {
     setup_ssh
     setup_fail2ban
     install_gateway_scripts
+    install_monitor_cron
 
     echo
     echo "════════════════════════════════════════════════"

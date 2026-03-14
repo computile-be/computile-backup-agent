@@ -20,6 +20,7 @@ DISK_CRITICAL_PERCENT=95
 GATEWAY_HEALTHCHECK_URL=""
 GATEWAY_WEBHOOK_URL=""
 GATEWAY_WEBHOOK_HEADERS=()
+MONITOR_RESTIC_CHECK="no"
 
 # ──────────────────────────────────────────────
 # Gateway config loading
@@ -2150,6 +2151,143 @@ _restore_select_snapshot() {
     echo "$choice"
 }
 
+_restore_browse() {
+    local snapshot_id="$1"
+    local current_dir="/"
+
+    # Cache the full file listing once (much faster than repeated restic ls calls)
+    local cache_file
+    cache_file=$(mktemp /tmp/restic-browse-XXXXXX) || return
+    trap "rm -f '$cache_file'" RETURN
+
+    $DIALOG --title "Browse" --infobox "Loading file list from snapshot ${snapshot_id}..." 5 $WT_WIDTH
+    restic ls --no-lock "$snapshot_id" 2>/dev/null > "$cache_file" || {
+        msg_box "Browse — Error" "Unable to list snapshot files."
+        return
+    }
+
+    while true; do
+        # List immediate children of current_dir
+        local -a items=()
+        local -a dirs=()
+        local -a files=()
+
+        while IFS= read -r entry; do
+            # Strip trailing slash for dirs
+            local clean="${entry%/}"
+            # Get parent dir
+            local parent="${clean%/*}"
+            [[ -z "$parent" ]] && parent="/"
+            # Must be direct child of current_dir
+            if [[ "$current_dir" == "/" ]]; then
+                # Direct children of / have exactly one slash at start and no other slashes
+                [[ "$clean" == /* ]] || continue
+                local rest="${clean#/}"
+                [[ "$rest" == */* ]] && continue
+                [[ -z "$rest" ]] && continue
+            else
+                [[ "$parent" == "$current_dir" ]] || continue
+            fi
+
+            local name="${clean##*/}"
+            # Check if it's a directory (has children in the listing)
+            local check_prefix
+            if [[ "$current_dir" == "/" ]]; then
+                check_prefix="/${name}/"
+            else
+                check_prefix="${current_dir}/${name}/"
+            fi
+            if grep -q "^${check_prefix}" "$cache_file" 2>/dev/null; then
+                dirs+=("$name")
+            else
+                files+=("$name")
+            fi
+        done < "$cache_file"
+
+        # Build menu items: ".." first (unless at /), then dirs, then files
+        local -a menu_items=()
+        if [[ "$current_dir" != "/" ]]; then
+            menu_items+=(".." "Parent directory")
+        fi
+        for d in $(printf '%s\n' "${dirs[@]+"${dirs[@]}"}" | sort); do
+            menu_items+=("${d}/" "directory")
+        done
+        for f in $(printf '%s\n' "${files[@]+"${files[@]}"}" | sort); do
+            menu_items+=("$f" "file")
+        done
+
+        if [[ ${#menu_items[@]} -eq 0 ]]; then
+            msg_box "Browse" "No entries in ${current_dir}"
+            return
+        fi
+
+        local choice
+        choice=$($DIALOG --title "Browse — ${current_dir}" \
+            --menu "Select entry (Esc to go back):" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+            "${menu_items[@]}" \
+            3>&1 1>&2 2>&3) || return
+
+        if [[ "$choice" == ".." ]]; then
+            # Go up one level
+            if [[ "$current_dir" == "/" ]]; then
+                continue
+            fi
+            current_dir="${current_dir%/*}"
+            [[ -z "$current_dir" ]] && current_dir="/"
+        elif [[ "$choice" == */ ]]; then
+            # Enter directory
+            local dir_name="${choice%/}"
+            if [[ "$current_dir" == "/" ]]; then
+                current_dir="/${dir_name}"
+            else
+                current_dir="${current_dir}/${dir_name}"
+            fi
+        else
+            # File selected — show path and offer restore
+            local full_path
+            if [[ "$current_dir" == "/" ]]; then
+                full_path="/${choice}"
+            else
+                full_path="${current_dir}/${choice}"
+            fi
+
+            local file_action
+            file_action=$($DIALOG --title "File — ${choice}" \
+                --menu "Path: ${full_path}" $WT_HEIGHT $WT_WIDTH 3 \
+                "restore" "Restore this file" \
+                "copy"    "Copy path to clipboard" \
+                "back"    "Go back" \
+                3>&1 1>&2 2>&3) || continue
+
+            case "$file_action" in
+                restore)
+                    local timestamp
+                    timestamp=$(date +%Y%m%d-%H%M%S)
+                    local target
+                    target=$($DIALOG --title "Restore — Target" \
+                        --inputbox "Directory to restore into:" 10 $WT_WIDTH \
+                        "/tmp/computile-restore-${timestamp}" \
+                        3>&1 1>&2 2>&3) || continue
+
+                    yesno "Confirm Restore" \
+                        "Restore: ${full_path}\nTarget: ${target}\n\nProceed?" || continue
+
+                    local result
+                    result=$(restic restore --no-lock "$snapshot_id" \
+                        --target "$target" --include "$full_path" 2>&1) || true
+                    msg_scroll "Restore Result" "$result"
+                    ;;
+                copy)
+                    echo -n "$full_path" | xclip -selection clipboard 2>/dev/null \
+                        || echo -n "$full_path" | xsel --clipboard 2>/dev/null \
+                        || msg_box "Path" "$full_path"
+                    ;;
+                back) ;;
+            esac
+        fi
+    done
+}
+
 _restore_action_menu() {
     local snapshot_id="$1"
 
@@ -2162,13 +2300,7 @@ _restore_action_menu() {
 
     case "$action" in
         browse)
-            local listing
-            listing=$(restic ls --no-lock "$snapshot_id" 2>/dev/null | head -500) || true
-            if [[ -z "$listing" ]]; then
-                msg_box "Browse" "No files found or unable to list snapshot."
-            else
-                msg_scroll "Files in ${snapshot_id}" "$listing"
-            fi
+            _restore_browse "$snapshot_id"
             ;;
         restore)
             local path target timestamp
@@ -2313,7 +2445,7 @@ monitor_and_alert() {
         fi
     fi
 
-    # --- Check 5: Stale backups ---
+    # --- Check 5: Stale backups (per-VPS) ---
     local stale_secs=$(( STALE_THRESHOLD_DAYS * 86400 ))
     local critical_secs=$(( stale_secs * 3 ))
 
@@ -2327,21 +2459,50 @@ monitor_and_alert() {
             continue
         fi
 
-        local last_epoch
-        last_epoch=$(get_last_activity_epoch "$data_dir")
+        # Check per-VPS freshness
+        local has_vps=false
+        for vps_dir in "$data_dir"/*/; do
+            [[ -d "$vps_dir" ]] || continue
+            local vps_name
+            vps_name=$(basename "$vps_dir")
+            [[ "$vps_name" == "_meta" ]] && continue
 
-        if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
+            has_vps=true
+            local vps_epoch=0
+
+            # Check snapshots/ and locks/ mtimes for this VPS
+            for marker in "$vps_dir/snapshots" "$vps_dir/locks"; do
+                if [[ -d "$marker" ]]; then
+                    local mtime
+                    mtime=$(stat -c '%Y' "$marker" 2>/dev/null) || continue
+                    if [[ $mtime -gt $vps_epoch ]]; then
+                        vps_epoch=$mtime
+                    fi
+                fi
+            done
+
+            # Fallback to the VPS directory mtime itself
+            if [[ $vps_epoch -eq 0 ]]; then
+                vps_epoch=$(stat -c '%Y' "$vps_dir" 2>/dev/null || echo "0")
+            fi
+
+            if [[ -z "$vps_epoch" ]] || [[ "$vps_epoch" == "0" ]]; then
+                alerts+=("warning|${display}/${vps_name}: never backed up")
+                continue
+            fi
+
+            local age_secs=$(( now - vps_epoch ))
+            local age_days=$(( age_secs / 86400 ))
+
+            if [[ $age_secs -gt $critical_secs ]]; then
+                alerts+=("critical|${display}/${vps_name}: last backup ${age_days}d ago (critical)")
+            elif [[ $age_secs -gt $stale_secs ]]; then
+                alerts+=("warning|${display}/${vps_name}: last backup ${age_days}d ago (stale)")
+            fi
+        done
+
+        if [[ "$has_vps" == "false" ]]; then
             alerts+=("warning|${display}: never backed up")
-            continue
-        fi
-
-        local age_secs=$(( now - last_epoch ))
-        local age_days=$(( age_secs / 86400 ))
-
-        if [[ $age_secs -gt $critical_secs ]]; then
-            alerts+=("critical|${display}: last backup ${age_days}d ago (critical)")
-        elif [[ $age_secs -gt $stale_secs ]]; then
-            alerts+=("warning|${display}: last backup ${age_days}d ago (stale)")
         fi
     done < <(list_clients)
 
@@ -2369,6 +2530,65 @@ monitor_and_alert() {
                     fi
                 done
             done
+        done < <(list_clients)
+    fi
+
+    # --- Check 7: NTP sync ---
+    if command -v timedatectl &>/dev/null; then
+        local ntp_sync
+        ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null) || true
+        if [[ "$ntp_sync" == "no" ]]; then
+            alerts+=("warning|System clock not synchronized (NTP)")
+        fi
+    fi
+
+    # --- Check 8: Security updates ---
+    if command -v apt &>/dev/null; then
+        local sec_count
+        sec_count=$(apt list --upgradable 2>/dev/null | grep -c -i security) || true
+        if [[ -n "$sec_count" ]] && [[ "$sec_count" -gt 0 ]]; then
+            alerts+=("warning|${sec_count} security update(s) available")
+        fi
+    fi
+
+    # --- Check 9: Restic integrity check ---
+    if [[ "${MONITOR_RESTIC_CHECK:-no}" == "yes" ]]; then
+        while IFS= read -r client; do
+            [[ -z "$client" ]] && continue
+            local display="${client#backup-}"
+            local data_dir="${BACKUP_BASE}/${client}/data"
+            local meta_dir="${BACKUP_BASE}/${client}/_meta"
+            [[ -d "$data_dir" ]] || continue
+
+            # Find the first VPS repo
+            local repo_path=""
+            for vps_dir in "$data_dir"/*/; do
+                [[ -d "$vps_dir" ]] || continue
+                local vps_name
+                vps_name=$(basename "$vps_dir")
+                [[ "$vps_name" == "_meta" ]] && continue
+                if [[ -f "$vps_dir/config" ]]; then
+                    repo_path="$vps_dir"
+                    break
+                fi
+            done
+            [[ -n "$repo_path" ]] || continue
+
+            # Find the password file
+            local password_file=""
+            if [[ -f "${meta_dir}/restic-password" ]]; then
+                password_file="${meta_dir}/restic-password"
+            elif [[ -f "${BACKUP_BASE}/${client}/restic-password" ]]; then
+                password_file="${BACKUP_BASE}/${client}/restic-password"
+            fi
+            [[ -n "$password_file" ]] || continue
+
+            # Run restic check with timeout
+            local check_output
+            if ! check_output=$(RESTIC_REPOSITORY="$repo_path" RESTIC_PASSWORD_FILE="$password_file" \
+                    timeout 120 restic check --no-lock --quiet 2>&1); then
+                alerts+=("warning|${display}: restic integrity check failed")
+            fi
         done < <(list_clients)
     fi
 
@@ -2495,6 +2715,62 @@ PEOF
 }
 
 # ──────────────────────────────────────────────
+# Test notifications (--test-notifications)
+# ──────────────────────────────────────────────
+test_notifications() {
+    _load_gateway_config
+
+    local hostname
+    hostname=$(hostname -f 2>/dev/null || hostname)
+    local any_configured=false
+
+    # Test healthcheck ping
+    if [[ -n "$GATEWAY_HEALTHCHECK_URL" ]]; then
+        any_configured=true
+        echo "Testing healthcheck ping: ${GATEWAY_HEALTHCHECK_URL}"
+        if curl -fsS --max-time 10 \
+                -X POST --data-raw "test" \
+                "$GATEWAY_HEALTHCHECK_URL" >/dev/null 2>&1; then
+            echo "  [OK] Healthcheck ping succeeded"
+        else
+            echo "  [FAIL] Healthcheck ping failed"
+        fi
+    fi
+
+    # Test webhook
+    if [[ -n "$GATEWAY_WEBHOOK_URL" ]]; then
+        any_configured=true
+        echo "Testing webhook: ${GATEWAY_WEBHOOK_URL}"
+
+        local payload
+        payload=$(cat <<PEOF
+{"status":"test","hostname":"${hostname}","alerts":[{"severity":"info","message":"Test notification from computile-gateway-manager"}],"summary":"This is a test notification"}
+PEOF
+        )
+
+        local -a curl_headers=()
+        curl_headers+=("-H" "Content-Type: application/json")
+        for hdr in "${GATEWAY_WEBHOOK_HEADERS[@]+"${GATEWAY_WEBHOOK_HEADERS[@]}"}"; do
+            [[ -n "$hdr" ]] && curl_headers+=("-H" "$hdr")
+        done
+
+        if curl -fsS --max-time 10 \
+                "${curl_headers[@]}" \
+                -X POST --data-raw "$payload" \
+                "$GATEWAY_WEBHOOK_URL" >/dev/null 2>&1; then
+            echo "  [OK] Webhook notification succeeded"
+        else
+            echo "  [FAIL] Webhook notification failed"
+        fi
+    fi
+
+    if [[ "$any_configured" == "false" ]]; then
+        echo "No notification channels configured."
+        echo "Set GATEWAY_HEALTHCHECK_URL and/or GATEWAY_WEBHOOK_URL in ${GATEWAY_CONFIG}"
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -2523,16 +2799,22 @@ case "${1:-}" in
         monitor_and_alert
         exit $?
         ;;
+    --test-notifications)
+        # Send test notifications to configured channels
+        test_notifications
+        exit 0
+        ;;
     --help|-h)
         cat <<'HELP'
 computile-gateway-manager — TUI manager for the backup gateway
 
 Usage:
   sudo computile-gateway-manager                 # Interactive TUI
-  sudo computile-gateway-manager --monitor        # Run health checks + send alerts (for cron)
-  sudo computile-gateway-manager --check-alerts   # Print stale backup alerts (for cron)
-  sudo computile-gateway-manager --report         # Full health report (text)
-  sudo computile-gateway-manager --report-json    # Full health report (JSON)
+  sudo computile-gateway-manager --monitor              # Run health checks + send alerts (for cron)
+  sudo computile-gateway-manager --check-alerts         # Print stale backup alerts (for cron)
+  sudo computile-gateway-manager --report               # Full health report (text)
+  sudo computile-gateway-manager --report-json          # Full health report (JSON)
+  sudo computile-gateway-manager --test-notifications   # Send test notification to all channels
 
 Interactive features:
   - Client overview: all clients, snapshot counts, last activity
@@ -2551,8 +2833,10 @@ Interactive features:
 Non-interactive modes:
   --monitor         Run all health checks, send healthcheck ping + webhook on problems
                     Config: /etc/computile-backup/gateway.conf
-                    Checks: SMB mount, disk space, SSH, fail2ban, stale backups, stuck locks
+                    Checks: SMB mount, disk space, SSH, fail2ban, stale backups (per-VPS),
+                            stuck locks, NTP sync, security updates, restic integrity
                     Exit codes: 0=ok, 1=warning, 2=critical
+  --test-notifications  Send a test notification to all configured channels
   --check-alerts    Prints alerts for stale/missing backups, exits 1 if any
   --report          Full health report (text format, to stdout)
   --report-json     Full health report (JSON format)

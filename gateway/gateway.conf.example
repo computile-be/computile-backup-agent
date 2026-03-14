@@ -21,6 +21,10 @@
 # DISK_WARN_PERCENT=85
 # DISK_CRITICAL_PERCENT=95
 
+# Enable restic integrity check in --monitor (heavy, runs "restic check" per client)
+# Recommended only for weekly cron, not every 15 minutes.
+# MONITOR_RESTIC_CHECK="no"
+
 # ----------------------------------------------
 # Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
 # ----------------------------------------------

@@ -4,6 +4,20 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.11.0] - 2026-03-14
+
+### Added
+- **Per-VPS freshness alerts** in `--monitor`: stale backup detection now drills down to each VPS individually instead of per-client only — catches individual VPS failures even when other VPS on the same client are healthy
+- **NTP sync check** in `--monitor`: warns if system clock is not synchronized (via `timedatectl`)
+- **Security updates check** in `--monitor`: warns if security patches are available (via `apt`)
+- **Restic integrity check** in `--monitor`: optional `MONITOR_RESTIC_CHECK=yes` runs `restic check --no-lock` per repo — recommended for weekly cron only (heavy operation, 120s timeout per repo)
+- **`--test-notifications`** flag: sends a test ping to healthcheck URL and/or webhook to verify notification channels are working
+- **Automatic monitoring cron** in `setup_gateway.sh`: installs `/etc/cron.d/computile-backup-monitor` (every 15 min) during setup — skip with `--no-cron`
+- **Interactive file browser** in restore TUI: navigate directories, inspect files, restore individual files directly from the browser
+
+### Changed
+- `--monitor` now runs 9 checks (was 6): SMB, disk, SSH, fail2ban, stale backups (per-VPS), stale locks, NTP, security updates, restic integrity (opt-in)
+
 ## [1.10.0] - 2026-03-14
 
 ### Added
