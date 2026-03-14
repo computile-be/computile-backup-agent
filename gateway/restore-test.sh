@@ -357,8 +357,10 @@ if $is_etc_restore; then
 
     if [ -f "$SAVE_DIR/sudoers_file" ]; then
         cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
-        chmod 440 "/etc/sudoers.d/${USERNAME}"
+    else
+        echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${USERNAME}"
     fi
+    chmod 440 "/etc/sudoers.d/${USERNAME}"
 
     # Restore PAM + nsswitch (critical for SSH session creation)
     if [ -d "$SAVE_DIR/pam" ]; then
