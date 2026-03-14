@@ -840,6 +840,113 @@ phase1_preflight() {
     fi
 }
 
+# Restore a single path from restic and rsync to target.
+# On OOM (exit 137), splits into sub-directories and retries.
+_restore_and_sync_path() {
+    local path="$1"
+    local path_idx="$2"
+    local total="$3"
+
+    log_info "[$path_idx/$total] Restoring $path ..."
+
+    # Clean temp dir before each path
+    rm -rf "${TEMP_RESTORE_DIR:?}/"*
+
+    local restic_output restic_rc=0
+    restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
+        --target "$TEMP_RESTORE_DIR" --include "$path" 2>&1) || restic_rc=$?
+
+    # OOM (137) → split into sub-directories and retry each one
+    if [[ $restic_rc -eq 137 ]]; then
+        log_warn "  OOM (exit 137) on $path — splitting into sub-directories..."
+        rm -rf "${TEMP_RESTORE_DIR:?}/"*
+
+        local -a subdirs=()
+        local subdir
+        while IFS= read -r subdir; do
+            [[ -n "$subdir" ]] && subdirs+=("$subdir")
+        done < <(restic ls --no-lock "$SNAPSHOT_ID" "$path" 2>/dev/null \
+            | grep -E "^${path}/[^/]+$" | sort -u | head -50)
+
+        if [[ ${#subdirs[@]} -eq 0 ]]; then
+            log_error "  Could not list sub-directories of $path"
+            report_ko "Restic restore $path: OOM and no sub-directories found"
+            failed_paths+=("$path")
+            return
+        fi
+
+        log_info "  Found ${#subdirs[@]} sub-directories, restoring individually..."
+        local sub_idx=0
+        for subdir in "${subdirs[@]}"; do
+            sub_idx=$((sub_idx + 1))
+            log_info "  [$path_idx/$total] Sub $sub_idx/${#subdirs[@]}: $subdir"
+
+            rm -rf "${TEMP_RESTORE_DIR:?}/"*
+
+            local sub_output sub_rc=0
+            sub_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
+                --target "$TEMP_RESTORE_DIR" --include "$subdir" 2>&1) || sub_rc=$?
+
+            if [[ $sub_rc -ne 0 ]]; then
+                log_error "    Restic restore failed for $subdir (exit code: $sub_rc)"
+                report_ko "Restic restore $subdir: exit $sub_rc"
+                failed_paths+=("$subdir")
+                continue
+            fi
+
+            local sub_bytes
+            sub_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+            total_restored_bytes=$((total_restored_bytes + ${sub_bytes:-0}))
+            log_info "    Extracted: $(_human_size "${sub_bytes:-0}")"
+
+            log_info "    Syncing $subdir to target..."
+            local rsync_out rsync_rc=0
+            rsync_out=$(rsync "${rsync_opts[@]}" \
+                "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
+
+            if [[ $rsync_rc -ne 0 ]]; then
+                log_error "    Rsync failed for $subdir (exit code: $rsync_rc)"
+                report_ko "Rsync $subdir: exit $rsync_rc — ${rsync_out}"
+                failed_paths+=("$subdir")
+                continue
+            fi
+        done
+        log_info "  $path done (via sub-directories)"
+        return
+    fi
+
+    # Other restic errors
+    if [[ $restic_rc -ne 0 ]]; then
+        log_error "  Restic restore failed for $path (exit code: $restic_rc)"
+        log_error "  Output: ${restic_output}"
+        report_ko "Restic restore $path: exit $restic_rc — ${restic_output}"
+        failed_paths+=("$path")
+        return
+    fi
+
+    # Calculate size
+    local path_bytes
+    path_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+    total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
+    log_info "  Extracted: $(_human_size "${path_bytes:-0}")"
+
+    # Rsync to target
+    log_info "  Syncing $path to target..."
+    local rsync_output rsync_rc=0
+    rsync_output=$(rsync "${rsync_opts[@]}" \
+        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
+
+    if [[ $rsync_rc -ne 0 ]]; then
+        log_error "  Rsync failed for $path (exit code: $rsync_rc)"
+        log_error "  Output: ${rsync_output}"
+        report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
+        failed_paths+=("$path")
+        return
+    fi
+
+    log_info "  $path done"
+}
+
 # ──────────────────────────────────────────────
 # Phase 2: Restore files
 # ──────────────────────────────────────────────
@@ -857,9 +964,11 @@ phase2_restore_files() {
         return 0
     fi
 
-    # Install prerequisites on target first
+    # Install prerequisites on target first (use sudo if not root)
     log_info "Installing prerequisites on target..."
-    if _ssh_target "DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq rsync gzip curl" &>/dev/null; then
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo"
+    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq rsync gzip curl" &>/dev/null; then
         report_ok "Target prerequisites installed"
     else
         report_warn "Could not install prerequisites (may already be present)"
@@ -922,6 +1031,11 @@ phase2_restore_files() {
     local total_paths=${#paths[@]}
     log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
 
+    # Build rsync command with sudo if needed
+    local rsync_rsh="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}"
+    local -a rsync_opts=(-az -e "$rsync_rsh")
+    [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
+
     # Restore and rsync each path individually to limit RAM usage
     local restore_start
     restore_start=$(date +%s)
@@ -931,49 +1045,7 @@ phase2_restore_files() {
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
-        log_info "[$path_idx/$total_paths] Restoring $path ..."
-
-        # Clean temp dir before each path to free disk and memory
-        rm -rf "${TEMP_RESTORE_DIR:?}/"*
-
-        local restic_output
-        local restic_rc=0
-        restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
-            --target "$TEMP_RESTORE_DIR" --include "$path" 2>&1) || restic_rc=$?
-
-        if [[ $restic_rc -ne 0 ]]; then
-            log_error "  Restic restore failed for $path (exit code: $restic_rc)"
-            log_error "  Output: ${restic_output}"
-            report_ko "Restic restore $path: exit $restic_rc — ${restic_output}"
-            failed_paths+=("$path")
-            continue
-        fi
-
-        # Calculate size of this path
-        local path_bytes
-        path_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-        total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
-        local path_human
-        path_human=$(_human_size "${path_bytes:-0}")
-        log_info "  Extracted: $path_human"
-
-        # Rsync this path to target
-        log_info "  Syncing $path to target..."
-        local rsync_output
-        local rsync_rc=0
-        rsync_output=$(rsync -az \
-            -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}" \
-            "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
-
-        if [[ $rsync_rc -ne 0 ]]; then
-            log_error "  Rsync failed for $path (exit code: $rsync_rc)"
-            log_error "  Output: ${rsync_output}"
-            report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
-            failed_paths+=("$path")
-            continue
-        fi
-
-        log_info "  $path done"
+        _restore_and_sync_path "$path" "$path_idx" "$total_paths"
     done
 
     # Cleanup temp dir

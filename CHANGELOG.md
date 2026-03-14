@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.0] - 2026-03-14
+
+### Fixed
+- **Restore test**: use `sudo` for apt-get and rsync on target when SSH user is not root — fixes "command not found" and permission errors
+- **Restore test**: on OOM (exit 137), automatically split the failing path into sub-directories and retry each one individually — handles large paths like `/data` on low-RAM gateways
+
 ## [1.21.0] - 2026-03-14
 
 ### Fixed
