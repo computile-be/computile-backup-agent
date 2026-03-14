@@ -33,6 +33,7 @@ INTERACTIVE=false
 SKIP_DB_RESTORE=false
 SKIP_CLEANUP=false
 DRY_RUN=false
+START_FROM_PHASE=1
 REPORT_DIR="$DEFAULT_REPORT_DIR"
 
 # Runtime state
@@ -1202,9 +1203,18 @@ Optional:
   --skip-db-restore      Skip database restoration phase
   --skip-cleanup         Do not clean up temp files
   --no-streaming         Force extract+rsync mode (disable streaming)
+  --start-from-phase N   Skip phases before N (2=skip restore, 3=skip restore+platform, etc.)
   --report-dir DIR       Report output directory (default: /var/log/computile-backup/)
   --dry-run              Show what would be done without executing
   --help                 Show this help
+
+Phases:
+  1  Pre-flight checks (always runs)
+  2  File restore (streaming or extract+rsync)
+  3  Platform (Coolify install, SSH keys, APP_KEY)
+  4  Database restore
+  5  Verification
+  6  Cleanup
 
 Examples:
   # Interactive mode (TUI selection)
@@ -1215,6 +1225,9 @@ Examples:
 
   # Test specific snapshot
   sudo computile-restore-test --client mycompany --vps vps-prod-01 --target test-vm --snapshot a1b2c3d4
+
+  # Resume from Phase 3 after a successful file restore
+  sudo computile-restore-test --client mycompany --vps vps-prod-01 --target test-vm --start-from-phase 3
 USAGE
 }
 
@@ -1231,6 +1244,7 @@ parse_args() {
             --skip-db-restore) SKIP_DB_RESTORE=true; shift ;;
             --skip-cleanup) SKIP_CLEANUP=true; shift ;;
             --no-streaming) NO_STREAMING=true; shift ;;
+            --start-from-phase) START_FROM_PHASE="$2"; shift 2 ;;
             --report-dir)   REPORT_DIR="$2"; shift 2 ;;
             --dry-run)      DRY_RUN=true; shift ;;
             --help|-h)      show_usage; exit 0 ;;
@@ -2668,24 +2682,56 @@ main() {
         fi
     fi
 
-    # Phase 1: Pre-flight
+    # Validate --start-from-phase
+    if [[ ! "$START_FROM_PHASE" =~ ^[1-6]$ ]]; then
+        die "--start-from-phase must be between 1 and 6 (got: $START_FROM_PHASE)"
+    fi
+    if [[ $START_FROM_PHASE -gt 1 ]]; then
+        log_info "Resuming from Phase ${START_FROM_PHASE} (phases 2-$((START_FROM_PHASE - 1)) skipped)"
+    fi
+
+    # Phase 1: Pre-flight (always runs — fast and required for SSH/sudo)
     phase1_preflight
 
     # Phase 2: Restore files
-    if ! phase2_restore_files; then
-        log_error "File restore failed. Generating partial report."
-        report_generate
-        exit 1
+    if [[ $START_FROM_PHASE -le 2 ]]; then
+        if ! phase2_restore_files; then
+            log_error "File restore failed. Generating partial report."
+            report_generate
+            exit 1
+        fi
+    else
+        log_section "PHASE 2: File Restore"
+        report_phase "2" "FILE RESTORE"
+        report_skip "Skipped (--start-from-phase $START_FROM_PHASE)"
     fi
 
     # Phase 3: Platform
-    phase3_platform || true
+    if [[ $START_FROM_PHASE -le 3 ]]; then
+        phase3_platform || true
+    else
+        log_section "PHASE 3: Platform Restore"
+        report_phase "3" "PLATFORM"
+        report_skip "Skipped (--start-from-phase $START_FROM_PHASE)"
+    fi
 
     # Phase 4: Databases
-    phase4_databases || true
+    if [[ $START_FROM_PHASE -le 4 ]]; then
+        phase4_databases || true
+    else
+        log_section "PHASE 4: Database Restore"
+        report_phase "4" "DATABASES"
+        report_skip "Skipped (--start-from-phase $START_FROM_PHASE)"
+    fi
 
     # Phase 5: Verify
-    phase5_verify || true
+    if [[ $START_FROM_PHASE -le 5 ]]; then
+        phase5_verify || true
+    else
+        log_section "PHASE 5: Verification"
+        report_phase "5" "VERIFICATION"
+        report_skip "Skipped (--start-from-phase $START_FROM_PHASE)"
+    fi
 
     # Phase 6: Cleanup
     phase6_cleanup
