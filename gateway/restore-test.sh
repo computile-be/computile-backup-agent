@@ -1515,11 +1515,23 @@ phase2_restore_files() {
     rsync_rsh=$(_rsync_ssh_cmd)
     local -a rsync_opts=(-az -e "$rsync_rsh")
     [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
-    # Exclude SSH config to avoid breaking the active connection
-    # Also exclude Coolify SSH keys — they will be handled in Phase 3
+    # Exclude files that would break SSH or system identity on the target
+    # These are machine-specific and not relevant for restore validation
     # Exclusions use paths relative to the transfer root (no leading /)
     rsync_opts+=(
         --exclude='etc/ssh/'
+        --exclude='etc/passwd'
+        --exclude='etc/passwd-'
+        --exclude='etc/shadow'
+        --exclude='etc/shadow-'
+        --exclude='etc/group'
+        --exclude='etc/group-'
+        --exclude='etc/gshadow'
+        --exclude='etc/gshadow-'
+        --exclude='etc/subuid'
+        --exclude='etc/subgid'
+        --exclude='etc/sudoers'
+        --exclude='etc/sudoers.d/'
         --exclude='home/*/.ssh/authorized_keys'
         --exclude='root/.ssh/authorized_keys'
         --exclude='data/coolify/ssh/keys/'
