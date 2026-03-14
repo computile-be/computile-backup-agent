@@ -341,13 +341,29 @@ if [ -d "$SAVE_DIR/pam" ]; then
     fi
 fi
 
-# Always restore SSH host keys + sshd config (so gateway can reconnect)
+# Restore SSH host keys + sshd config, but only reload sshd if keys actually changed.
+# Unnecessary reloads kill the SSH ControlMaster on some systems (Debian 13+).
 if [ -d "$SAVE_DIR/ssh" ]; then
+    keys_changed=false
+    for saved_key in "$SAVE_DIR"/ssh/ssh_host_*; do
+        [ -f "$saved_key" ] || continue
+        current_key="/etc/ssh/$(basename "$saved_key")"
+        if ! cmp -s "$saved_key" "$current_key" 2>/dev/null; then
+            keys_changed=true
+            break
+        fi
+    done
+    if ! cmp -s "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
+        keys_changed=true
+    fi
+
     cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
     cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
-    # Reload sshd (keeps existing connections alive, unlike restart)
-    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+
+    if $keys_changed; then
+        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
+            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+    fi
 fi
 FIXUP_SCRIPT
 
@@ -1459,14 +1475,16 @@ _restore_and_sync_path() {
         return
     fi
 
-    # Check target disk space after rsync
-    local target_avail_kb
-    target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
-    if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
-        local target_avail_gb=$((target_avail_kb / 1048576))
-        if [[ $target_avail_gb -lt 2 ]]; then
-            log_warn "${indent}  Target disk space critically low: ${target_avail_gb} GB remaining"
-            report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
+    # Check target disk space after rsync (skip if SSH is broken — avoids false "0 GB" warning)
+    if _ssh_target true 2>/dev/null; then
+        local target_avail_kb
+        target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "")
+        if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
+            local target_avail_gb=$((target_avail_kb / 1048576))
+            if [[ $target_avail_gb -lt 2 ]]; then
+                log_warn "${indent}  Target disk space critically low: ${target_avail_gb} GB remaining"
+                report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
+            fi
         fi
     fi
 

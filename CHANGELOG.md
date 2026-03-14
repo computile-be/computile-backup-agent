@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.32.2] - 2026-03-14
+
+### Fixed
+- **Restore test**: SSH fixup no longer reloads sshd unnecessarily — only reloads when host keys or sshd_config actually changed (fixes SSH breakage after `/home` rsync on Debian 13)
+- **Restore test**: disk space check after rsync skipped when SSH is broken — prevents false "0 GB remaining" warnings caused by SSH command fallback
+
 ## [1.32.1] - 2026-03-14
 
 ### Changed
