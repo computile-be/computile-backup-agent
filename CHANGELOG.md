@@ -4,6 +4,16 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.31.0] - 2026-03-14
+
+### Added
+- **Restore test**: create a dedicated `computile-restore` user on the target VM before restoring. Home directory is in `/tmp` (safe from `/home` rsync), and the rsync wrapper re-injects this user into `/etc/passwd` after each rsync. Eliminates all SSH breakage during extract+rsync mode
+- **Restore test**: rsync wrapper script (`/tmp/computile-rsync-wrapper.sh`) deployed on target — runs rsync then the SSH fixup inline, within the same SSH session. Simple script path avoids rsync `--rsync-path` tokenization issues
+
+### Changed
+- **Restore test**: remove `/etc` staging approach — no longer needed with the dedicated restore user + rsync wrapper. All paths rsync directly to `/`
+- **Restore test**: restore user is cleaned up in Phase 6
+
 ## [1.30.1] - 2026-03-14
 
 ### Changed

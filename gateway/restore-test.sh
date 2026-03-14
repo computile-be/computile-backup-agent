@@ -48,6 +48,9 @@ SSH_CONTROL_SOCKET=""
 LOG_FILE=""
 USE_STREAMING=false
 NO_STREAMING=false
+ORIGINAL_SSH_USER=""
+RESTORE_USER="computile-restore"
+RESTORE_USER_CREATED=false
 
 # Report counters
 COUNT_OK=0
@@ -323,6 +326,7 @@ fi
 
 # Home dir + authorized_keys
 mkdir -p "${USER_HOME}/.ssh"
+chmod 755 "${USER_HOME}"
 chmod 700 "${USER_HOME}/.ssh"
 chown "${USER_UID}:${USER_GID}" "${USER_HOME}" "${USER_HOME}/.ssh"
 if [ -f "$SAVE_DIR/authorized_keys" ]; then
@@ -341,18 +345,112 @@ fi
 FIXUP_SCRIPT
 
 chmod +x /tmp/computile-ssh-fixup.sh
+
+# Also create the rsync wrapper that runs fixup after each rsync
+cat > /tmp/computile-rsync-wrapper.sh <<'WRAPPER_SCRIPT'
+#!/bin/bash
+rsync "$@"
+RC=$?
+/tmp/computile-ssh-fixup.sh 2>/dev/null || true
+exit $RC
+WRAPPER_SCRIPT
+chmod +x /tmp/computile-rsync-wrapper.sh
 FIXUP_DEPLOY_EOF
         log_warn "  Could not deploy SSH fixup script"
         return 1
     }
-    log_info "  SSH fixup script deployed on target"
+    log_info "  SSH fixup + rsync wrapper deployed on target"
 }
 
-# Remove the SSH fixup script and saved identity (called during cleanup)
+# Remove the SSH fixup script, rsync wrapper, and saved identity (called during cleanup)
 _cleanup_ssh_fixup() {
     _ssh_target "sudo bash -c '
-        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-ssh-save
+        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-rsync-wrapper.sh /tmp/computile-ssh-save /tmp/computile-restore-staging
     '" 2>/dev/null || true
+}
+
+# Create a dedicated restore user on the target.
+# This user's home is in /tmp (not /home), so rsync of /home won't break SSH.
+# The rsync wrapper + fixup handles /etc overwrites (re-injects this user after rsync).
+_create_restore_user() {
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
+
+    # Get the gateway's SSH public key
+    local gw_pubkey=""
+    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
+        if [[ -f "$f" ]]; then
+            gw_pubkey=$(cat "$f")
+            break
+        fi
+    done
+    [[ -z "$gw_pubkey" ]] && { log_error "No gateway SSH public key found"; return 1; }
+
+    log_info "Creating dedicated restore user '${RESTORE_USER}' on target..."
+    if _ssh_target "${_sudo}bash -s" <<CREATEUSER_EOF 2>/dev/null; then
+set -e
+# Remove old restore user if leftover from a previous run
+if id "${RESTORE_USER}" &>/dev/null; then
+    userdel -rf "${RESTORE_USER}" 2>/dev/null || true
+fi
+
+# Create user with home in /tmp (safe from rsync of /home)
+useradd -r -m -d /tmp/${RESTORE_USER} -s /bin/bash ${RESTORE_USER}
+
+# Sudo NOPASSWD
+echo "${RESTORE_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${RESTORE_USER}
+chmod 440 /etc/sudoers.d/${RESTORE_USER}
+
+# Authorize gateway SSH key
+mkdir -p /tmp/${RESTORE_USER}/.ssh
+echo "${gw_pubkey}" > /tmp/${RESTORE_USER}/.ssh/authorized_keys
+chmod 700 /tmp/${RESTORE_USER}/.ssh
+chmod 600 /tmp/${RESTORE_USER}/.ssh/authorized_keys
+chown -R ${RESTORE_USER}:${RESTORE_USER} /tmp/${RESTORE_USER}
+CREATEUSER_EOF
+        log_info "  User '${RESTORE_USER}' created (home: /tmp/${RESTORE_USER})"
+        RESTORE_USER_CREATED=true
+    else
+        log_error "  Failed to create restore user"
+        return 1
+    fi
+
+    # Test SSH as the restore user
+    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
+        -p "$SSH_PORT" "${RESTORE_USER}@${TARGET}" "echo ok" &>/dev/null; then
+        log_info "  SSH as '${RESTORE_USER}' verified OK"
+    else
+        log_error "  Cannot SSH as '${RESTORE_USER}' — falling back to '${SSH_USER}'"
+        return 1
+    fi
+
+    # Switch to using the restore user
+    ORIGINAL_SSH_USER="$SSH_USER"
+    SSH_USER="$RESTORE_USER"
+
+    # Re-establish ControlMaster with new user
+    _cleanup_ssh_control
+    _setup_ssh_control
+}
+
+# Remove the dedicated restore user from the target
+_delete_restore_user() {
+    if ! $RESTORE_USER_CREATED; then
+        return 0
+    fi
+
+    # Switch back to original user for cleanup (restore user may have been
+    # removed from /etc by the restore itself — use the original user)
+    local cleanup_user="${ORIGINAL_SSH_USER:-$SSH_USER}"
+    log_info "Removing restore user '${RESTORE_USER}' from target..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes \
+        -p "$SSH_PORT" "${cleanup_user}@${TARGET}" \
+        "sudo bash -c 'userdel -rf ${RESTORE_USER} 2>/dev/null; rm -f /etc/sudoers.d/${RESTORE_USER}'" 2>/dev/null || {
+        # If original user can't connect, try as restore user
+        _ssh_target "sudo bash -c 'userdel -rf ${RESTORE_USER} 2>/dev/null; rm -f /etc/sudoers.d/${RESTORE_USER}'" 2>/dev/null || true
+    }
+    log_info "  Restore user removed"
 }
 
 # Stream a path directly from restic to target via SSH (no local disk writes).
@@ -1414,25 +1512,15 @@ _restore_and_sync_path() {
     log_info "${indent}  Extracted: $(_human_size "${path_bytes:-0}")"
 
     # Rsync to target with progress
-    # Sensitive paths (/etc) go to a staging dir — applied later to avoid breaking SSH
-    local rsync_dest="/"
-    local is_staged=false
-    if [[ "$path" == "/etc" || "$path" == "/etc/"* ]]; then
-        rsync_dest="/tmp/computile-restore-staging/"
-        is_staged=true
-    fi
-
+    # The rsync wrapper on the target runs the SSH fixup after each rsync,
+    # re-injecting the restore user + host keys within the same SSH session.
     local path_human
     path_human=$(_human_size "${path_bytes:-0}")
-    if $is_staged; then
-        log_info "${indent}  Syncing $path to staging dir on target (${path_human})..."
-    else
-        log_info "${indent}  Syncing $path to target (${path_human})..."
-    fi
+    log_info "${indent}  Syncing $path to target (${path_human})..."
     local rsync_log="${TEMP_RESTORE_DIR}.rsync.log"
     local rsync_rc=0
     rsync "${rsync_opts[@]}" --info=progress2 \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:${rsync_dest}" \
+        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" \
         > >(tee "$rsync_log") 2>&1 || rsync_rc=$?
     local rsync_output
     rsync_output=$(cat "$rsync_log" 2>/dev/null) || true
@@ -1444,10 +1532,6 @@ _restore_and_sync_path() {
         report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
         failed_paths+=("$path")
         return
-    fi
-
-    if $is_staged; then
-        log_info "${indent}  $path staged (will be applied after all other paths)"
     fi
 
     # Check target disk space after rsync
@@ -1506,7 +1590,7 @@ phase2_restore_files() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo"
     local prereqs="gzip curl"
     [[ "$USE_STREAMING" != true ]] && prereqs+=" rsync"
-    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs} && ${_sudo} mkdir -p /tmp/computile-restore-staging" &>/dev/null; then
+    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs}" &>/dev/null; then
         report_ok "Target prerequisites installed"
     else
         report_warn "Could not install prerequisites (may already be present)"
@@ -1664,11 +1748,16 @@ SAVE_EOF
     paths=("${sorted_paths[@]}")
     log_info "Restore order: ${paths[*]}"
 
-    # Build rsync command
+    # Build rsync command with the wrapper that runs the SSH fixup after each rsync.
+    # The wrapper is a simple script on the target — no tokenization issues.
     local rsync_rsh
     rsync_rsh=$(_rsync_ssh_cmd)
     local -a rsync_opts=(-az -e "$rsync_rsh")
-    [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
+    if $fixup_ok; then
+        rsync_opts+=(--rsync-path="sudo /tmp/computile-rsync-wrapper.sh")
+    elif [[ "$SSH_USER" != "root" ]]; then
+        rsync_opts+=(--rsync-path="sudo rsync")
+    fi
     # Only exclude Coolify SSH keys — they are handled in Phase 3
     rsync_opts+=(
         --exclude='data/coolify/ssh/keys/'
@@ -1688,55 +1777,24 @@ SAVE_EOF
         fi
     done
 
-    # Apply staged sensitive files (/etc) and run SSH fixup.
-    # The ControlMaster is guaranteed alive because we never rsynced directly to /etc.
-    if [[ ${#failed_paths[@]} -eq 0 ]] && $fixup_ok; then
-        log_info "Applying staged /etc files on target + SSH fixup..."
-        local _sudo_apply=""
-        [[ "$SSH_USER" != "root" ]] && _sudo_apply="sudo "
-        if _ssh_target "${_sudo_apply}bash -s" <<'APPLY_EOF' 2>/dev/null; then
-STAGING="/tmp/computile-restore-staging"
-if [ -d "$STAGING" ] && [ "$(ls -A "$STAGING" 2>/dev/null)" ]; then
-    # Apply staged files to real filesystem
-    rsync -a "$STAGING/" / 2>/dev/null || cp -a "$STAGING/." / 2>/dev/null || true
-    rm -rf "$STAGING"
-fi
-# Re-inject SSH user + host keys (idempotent)
-if [ -x /tmp/computile-ssh-fixup.sh ]; then
-    /tmp/computile-ssh-fixup.sh
-fi
-APPLY_EOF
-            log_info "  Staged files applied + SSH fixup complete"
-            # Re-establish ControlMaster after sshd restart
-            if ! _ssh_target true 2>/dev/null; then
+    # Re-establish SSH if the ControlMaster went stale after fixup sshd restarts.
+    # The rsync wrapper ran the fixup inline, so the restore user should exist
+    # in /etc/passwd. We just need to refresh the ControlMaster.
+    if ! _ssh_target true 2>/dev/null; then
+        log_info "Re-establishing SSH after restore (fixup restarted sshd)..."
+        _cleanup_ssh_control
+        ssh-keygen -R "$TARGET" 2>/dev/null || true
+        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
+        for attempt in 1 2 3 4 5; do
+            sleep 2
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=5 -o BatchMode=yes \
+                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                _setup_ssh_control
+                _ssh_target true 2>/dev/null && break
                 _cleanup_ssh_control
-                ssh-keygen -R "$TARGET" 2>/dev/null || true
-                ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
-                local ssh_ok=false
-                for attempt in 1 2 3 4 5; do
-                    sleep 2
-                    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                        -o ConnectTimeout=5 -o BatchMode=yes \
-                        -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
-                        _setup_ssh_control
-                        if _ssh_target true 2>/dev/null; then
-                            ssh_ok=true
-                            break
-                        fi
-                        _cleanup_ssh_control
-                    fi
-                done
-                if ! $ssh_ok; then
-                    log_error "  SSH connectivity lost after applying staged files"
-                    report_ko "SSH lost after applying staged /etc"
-                    failed_paths+=("/etc (apply)")
-                fi
             fi
-        else
-            log_error "  Failed to apply staged files"
-            report_ko "Failed to apply staged /etc files on target"
-            failed_paths+=("/etc (apply)")
-        fi
+        done
     fi
 
     # Cleanup temp dir
@@ -2324,8 +2382,11 @@ _verify_applications() {
 phase6_cleanup() {
     log_section "PHASE 6: Cleanup"
 
-    # Remove SSH fixup script and saved identity from target
+    # Remove SSH fixup script, rsync wrapper, and saved identity from target
     _cleanup_ssh_fixup
+
+    # Remove the dedicated restore user
+    _delete_restore_user
 
     if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" ]]; then
         if $SKIP_CLEANUP; then
@@ -2439,6 +2500,12 @@ main() {
             log_info "Cancelled by user."
             exit 0
         fi
+    fi
+
+    # Create a dedicated restore user on target — home in /tmp (safe from /home rsync),
+    # rsync wrapper + fixup handles /etc overwrites (re-injects user after each rsync)
+    if ! $DRY_RUN; then
+        _create_restore_user || log_warn "Could not create restore user — using ${SSH_USER} (SSH may break during restore)"
     fi
 
     # Phase 1: Pre-flight
