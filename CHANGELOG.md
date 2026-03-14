@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.19.1] - 2026-03-14
+
+### Fixed
+- **Restore test**: reduce SSH key copy timeout from 15s to 10s (ConnectTimeout 5s) for faster fallback to manual instructions
+
 ## [1.19.0] - 2026-03-14
 
 ### Improved

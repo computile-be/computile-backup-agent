@@ -497,13 +497,13 @@ _push_ssh_key_via_password() {
         return 1
     fi
 
-    # Push key using ssh-copy-id (with 15s timeout)
-    log_info "Copying SSH key to ${SSH_USER}@${TARGET}:${SSH_PORT} (timeout: 15s)..."
+    # Push key using ssh-copy-id (with 10s timeout)
+    log_info "Copying SSH key to ${SSH_USER}@${TARGET}:${SSH_PORT} (timeout: 10s)..."
     local output
     local copy_rc=0
-    output=$(timeout 15 sshpass -p "$password" ssh-copy-id \
+    output=$(timeout 10 sshpass -p "$password" ssh-copy-id \
         -o StrictHostKeyChecking=accept-new \
-        -o ConnectTimeout=10 \
+        -o ConnectTimeout=5 \
         -p "$SSH_PORT" \
         -i "$key_file" \
         "${SSH_USER}@${TARGET}" 2>&1) || copy_rc=$?
@@ -533,7 +533,7 @@ _push_ssh_key_via_password() {
 
     # ssh-copy-id failed — fallback to manual instructions
     if [[ $copy_rc -eq 124 ]]; then
-        log_warn "  -> ssh-copy-id timed out after 15s"
+        log_warn "  -> ssh-copy-id timed out after 10s"
     else
         log_error "  -> ssh-copy-id failed (exit code: $copy_rc)"
         [[ -n "$output" ]] && log_error "  Output: ${output}"
@@ -542,7 +542,7 @@ _push_ssh_key_via_password() {
     local pub_key
     pub_key=$(cat "${key_file}")
 
-    local fail_reason="Timed out after 15 seconds"
+    local fail_reason="Timed out after 10 seconds"
     [[ $copy_rc -ne 124 ]] && fail_reason="Error: ${output}"
 
     local msg="Automatic key copy failed.\n${fail_reason}\n\n"
