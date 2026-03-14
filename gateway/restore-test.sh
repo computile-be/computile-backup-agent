@@ -47,6 +47,7 @@ SSH_CONTROL_DIR=""
 SSH_CONTROL_SOCKET=""
 LOG_FILE=""
 USE_STREAMING=false
+NO_STREAMING=false
 
 # Report counters
 COUNT_OK=0
@@ -907,6 +908,7 @@ Optional:
   --ssh-port PORT        SSH port on target (default: 22)
   --skip-db-restore      Skip database restoration phase
   --skip-cleanup         Do not clean up temp files
+  --no-streaming         Force extract+rsync mode (disable streaming)
   --report-dir DIR       Report output directory (default: /var/log/computile-backup/)
   --dry-run              Show what would be done without executing
   --help                 Show this help
@@ -935,6 +937,7 @@ parse_args() {
             --ssh-port)     SSH_PORT="$2"; shift 2 ;;
             --skip-db-restore) SKIP_DB_RESTORE=true; shift ;;
             --skip-cleanup) SKIP_CLEANUP=true; shift ;;
+            --no-streaming) NO_STREAMING=true; shift ;;
             --report-dir)   REPORT_DIR="$2"; shift 2 ;;
             --dry-run)      DRY_RUN=true; shift ;;
             --help|-h)      show_usage; exit 0 ;;
@@ -1347,17 +1350,21 @@ phase2_restore_files() {
 
     # Detect streaming support (restic dump --archive tar, available since restic 0.10)
     log_info "Checking streaming support..."
-    local restic_ver
-    restic_ver=$(restic version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || true)
-    local restic_major restic_minor
-    restic_major=$(echo "$restic_ver" | cut -d. -f1)
-    restic_minor=$(echo "$restic_ver" | cut -d. -f2)
-    if [[ "${restic_major:-0}" -gt 0 || "${restic_minor:-0}" -ge 10 ]]; then
-        USE_STREAMING=true
-        log_info "  Streaming mode enabled (restic dump → ssh → tar, no local disk writes)"
-        log_info "  This reduces gateway IO by ~50% (read-only, no temp file writes)"
+    if $NO_STREAMING; then
+        log_info "  Streaming disabled (--no-streaming), using extract+rsync"
     else
-        log_info "  Streaming not available (restic ${restic_ver:-unknown} < 0.10), using extract+rsync"
+        local restic_ver
+        restic_ver=$(restic version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || true)
+        local restic_major restic_minor
+        restic_major=$(echo "$restic_ver" | cut -d. -f1)
+        restic_minor=$(echo "$restic_ver" | cut -d. -f2)
+        if [[ "${restic_major:-0}" -gt 0 || "${restic_minor:-0}" -ge 10 ]]; then
+            USE_STREAMING=true
+            log_info "  Streaming mode enabled (restic dump → ssh → tar, no local disk writes)"
+            log_info "  This reduces gateway IO by ~50% (read-only, no temp file writes)"
+        else
+            log_info "  Streaming not available (restic ${restic_ver:-unknown} < 0.10), using extract+rsync"
+        fi
     fi
 
     # Install prerequisites on target first (use sudo if not root)

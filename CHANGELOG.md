@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.28.1] - 2026-03-14
 
+### Added
+- **Restore test**: `--no-streaming` flag to force extract+rsync mode (useful for performance comparison)
+
 ### Changed
 - **Restore test**: progress logs now show segment speed (last 15s) alongside cumulative average (e.g. `6.7 MB/s, avg 16.8 MB/s`)
 
