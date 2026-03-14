@@ -4,6 +4,15 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.31.2] - 2026-03-14
+
+### Changed
+- **Restore test**: remove automatic creation/deletion of `computile-restore` user — the user must be pre-created on the target VM before running the test
+- **Docs**: remove "Option 2: Création automatique" from `RESTORE.md` section 9; clarify that `computile-restore` must be pre-created
+
+### Fixed
+- **Restore test**: clean up unused variables (`ORIGINAL_SSH_USER`, `RESTORE_USER_CREATED`, `RESTORE_USER`)
+
 ## [1.31.1] - 2026-03-14
 
 ### Changed

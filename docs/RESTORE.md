@@ -386,10 +386,6 @@ sudo chown -R computile-restore:computile-restore /tmp/computile-restore
 
 > **Pourquoi `/tmp` comme home ?** Pendant le restore, rsync écrase `/home` et `/etc` avec les données du backup. Un utilisateur classique (home dans `/home`) verrait son répertoire et ses credentials remplacés, cassant la connexion SSH. Le home dans `/tmp` est hors du périmètre de restore.
 
-**Option 2 : Création automatique**
-
-Si vous vous connectez avec un autre utilisateur (ex: `--ssh-user root`), l'outil crée automatiquement `computile-restore` sur la cible et bascule dessus. L'utilisateur est supprimé en fin de test.
-
 ### Usage interactif (TUI)
 
 ```bash
@@ -410,12 +406,12 @@ sudo computile-restore-test \
     --vps vps-prod-01 \
     --target test-vm.tail1234.ts.net
 
-# Avec un autre utilisateur initial (crée computile-restore automatiquement)
+# Avec un autre utilisateur SSH spécifique
 sudo computile-restore-test \
     --client mycompany \
     --vps vps-prod-01 \
     --target test-vm.tail1234.ts.net \
-    --ssh-user root
+    --ssh-user other-user
 ```
 
 ### Options
@@ -450,7 +446,7 @@ Le restore écrase des fichiers système critiques (`/etc/passwd`, `/etc/shadow`
 3. **Platform** : installation Coolify, restauration SSH keys, APP_PREVIOUS_KEYS
 4. **Databases** : import des dumps MySQL, PostgreSQL, Redis
 5. **Verification** : Docker, containers, dashboard Coolify, connexions DB, apps HTTP
-6. **Cleanup** : suppression des fichiers temporaires et de l'utilisateur restore
+6. **Cleanup** : suppression des fichiers temporaires
 
 ### Rapport
 

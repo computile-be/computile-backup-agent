@@ -48,10 +48,6 @@ SSH_CONTROL_SOCKET=""
 LOG_FILE=""
 USE_STREAMING=false
 NO_STREAMING=false
-ORIGINAL_SSH_USER=""
-RESTORE_USER="computile-restore"
-RESTORE_USER_CREATED=false
-
 # Report counters
 COUNT_OK=0
 COUNT_KO=0
@@ -369,103 +365,7 @@ _cleanup_ssh_fixup() {
     '" 2>/dev/null || true
 }
 
-# Create a dedicated restore user on the target.
-# This user's home is in /tmp (not /home), so rsync of /home won't break SSH.
-# The rsync wrapper + fixup handles /etc overwrites (re-injects this user after rsync).
-# Skipped if already connecting as the restore user (user pre-exists on target).
-_create_restore_user() {
-    # If already connecting as the restore user, it exists — just verify sudo works
-    if [[ "$SSH_USER" == "$RESTORE_USER" ]]; then
-        log_info "Already connected as '${RESTORE_USER}' — verifying sudo access..."
-        if _ssh_target "sudo true" 2>/dev/null; then
-            log_info "  Sudo access OK"
-            RESTORE_USER_CREATED=false  # Don't delete on cleanup — user was pre-existing
-            return 0
-        else
-            log_error "  User '${RESTORE_USER}' has no sudo access"
-            return 1
-        fi
-    fi
 
-    local _sudo=""
-    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-
-    # Get the gateway's SSH public key
-    local gw_pubkey=""
-    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
-        if [[ -f "$f" ]]; then
-            gw_pubkey=$(cat "$f")
-            break
-        fi
-    done
-    [[ -z "$gw_pubkey" ]] && { log_error "No gateway SSH public key found"; return 1; }
-
-    log_info "Creating dedicated restore user '${RESTORE_USER}' on target..."
-    if _ssh_target "${_sudo}bash -s" <<CREATEUSER_EOF 2>/dev/null; then
-set -e
-# Remove old restore user if leftover from a previous run
-if id "${RESTORE_USER}" &>/dev/null; then
-    userdel -rf "${RESTORE_USER}" 2>/dev/null || true
-fi
-
-# Create user with home in /tmp (safe from rsync of /home)
-useradd -r -m -d /tmp/${RESTORE_USER} -s /bin/bash ${RESTORE_USER}
-
-# Sudo NOPASSWD
-echo "${RESTORE_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${RESTORE_USER}
-chmod 440 /etc/sudoers.d/${RESTORE_USER}
-
-# Authorize gateway SSH key
-mkdir -p /tmp/${RESTORE_USER}/.ssh
-echo "${gw_pubkey}" > /tmp/${RESTORE_USER}/.ssh/authorized_keys
-chmod 700 /tmp/${RESTORE_USER}/.ssh
-chmod 600 /tmp/${RESTORE_USER}/.ssh/authorized_keys
-chown -R ${RESTORE_USER}:${RESTORE_USER} /tmp/${RESTORE_USER}
-CREATEUSER_EOF
-        log_info "  User '${RESTORE_USER}' created (home: /tmp/${RESTORE_USER})"
-        RESTORE_USER_CREATED=true
-    else
-        log_error "  Failed to create restore user"
-        return 1
-    fi
-
-    # Test SSH as the restore user
-    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
-        -p "$SSH_PORT" "${RESTORE_USER}@${TARGET}" "echo ok" &>/dev/null; then
-        log_info "  SSH as '${RESTORE_USER}' verified OK"
-    else
-        log_error "  Cannot SSH as '${RESTORE_USER}' — falling back to '${SSH_USER}'"
-        return 1
-    fi
-
-    # Switch to using the restore user
-    ORIGINAL_SSH_USER="$SSH_USER"
-    SSH_USER="$RESTORE_USER"
-
-    # Re-establish ControlMaster with new user
-    _cleanup_ssh_control
-    _setup_ssh_control
-}
-
-# Remove the dedicated restore user from the target
-_delete_restore_user() {
-    if ! $RESTORE_USER_CREATED; then
-        return 0
-    fi
-
-    # Switch back to original user for cleanup (restore user may have been
-    # removed from /etc by the restore itself — use the original user)
-    local cleanup_user="${ORIGINAL_SSH_USER:-$SSH_USER}"
-    log_info "Removing restore user '${RESTORE_USER}' from target..."
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=10 -o BatchMode=yes \
-        -p "$SSH_PORT" "${cleanup_user}@${TARGET}" \
-        "sudo bash -c 'userdel -rf ${RESTORE_USER} 2>/dev/null; rm -f /etc/sudoers.d/${RESTORE_USER}'" 2>/dev/null || {
-        # If original user can't connect, try as restore user
-        _ssh_target "sudo bash -c 'userdel -rf ${RESTORE_USER} 2>/dev/null; rm -f /etc/sudoers.d/${RESTORE_USER}'" 2>/dev/null || true
-    }
-    log_info "  Restore user removed"
-}
 
 # Stream a path directly from restic to target via SSH (no local disk writes).
 # Uses: restic dump --archive tar | ssh tar xf -
@@ -2399,9 +2299,6 @@ phase6_cleanup() {
     # Remove SSH fixup script, rsync wrapper, and saved identity from target
     _cleanup_ssh_fixup
 
-    # Remove the dedicated restore user
-    _delete_restore_user
-
     if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" ]]; then
         if $SKIP_CLEANUP; then
             log_info "Temp directory preserved: $TEMP_RESTORE_DIR"
@@ -2514,12 +2411,6 @@ main() {
             log_info "Cancelled by user."
             exit 0
         fi
-    fi
-
-    # Create a dedicated restore user on target — home in /tmp (safe from /home rsync),
-    # rsync wrapper + fixup handles /etc overwrites (re-injects user after each rsync)
-    if ! $DRY_RUN; then
-        _create_restore_user || log_warn "Could not create restore user — using ${SSH_USER} (SSH may break during restore)"
     fi
 
     # Phase 1: Pre-flight
