@@ -823,6 +823,23 @@ phase1_preflight() {
         report_ok "Disk space check (dry-run)"
     fi
 
+    # Check gateway disk space (for local restore before rsync)
+    if ! $DRY_RUN; then
+        local gw_avail_kb
+        gw_avail_kb=$(df /var/tmp --output=avail 2>/dev/null | tail -1 | tr -d ' ')
+        if [[ "$gw_avail_kb" =~ ^[0-9]+$ ]]; then
+            local gw_avail_gb=$((gw_avail_kb / 1048576))
+            if [[ $gw_avail_gb -ge 5 ]]; then
+                report_ok "Gateway disk space: ${gw_avail_gb} GB available on /var/tmp"
+            elif [[ $gw_avail_gb -ge 2 ]]; then
+                report_warn "Gateway disk space: ${gw_avail_gb} GB available on /var/tmp (low — restore may fail for large paths)"
+            else
+                report_ko "Gateway disk space: ${gw_avail_gb} GB available on /var/tmp (minimum 2 GB required)"
+                die "Insufficient disk space on gateway for restore temp files. Aborting."
+            fi
+        fi
+    fi
+
     # Check if Coolify already installed on target
     if ! $DRY_RUN && [[ "$ROLE" == "coolify" ]]; then
         if _ssh_target "test -d /data/coolify" 2>/dev/null; then
@@ -936,8 +953,8 @@ phase2_restore_files() {
     log_section "PHASE 2: File Restore"
     report_phase "2" "FILE RESTORE"
 
-    # Create temp directory on gateway
-    TEMP_RESTORE_DIR=$(mktemp -d /tmp/computile-restore-test-XXXXXX) || die "Failed to create temp directory"
+    # Create temp directory on gateway — use /var/tmp (on disk) instead of /tmp (often tmpfs = RAM)
+    TEMP_RESTORE_DIR=$(mktemp -d /var/tmp/computile-restore-test-XXXXXX) || die "Failed to create temp directory"
     log_info "Temp restore directory: $TEMP_RESTORE_DIR"
 
     if $DRY_RUN; then

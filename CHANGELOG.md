@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.4] - 2026-03-14
+
+### Fixed
+- **Restore test**: use `/var/tmp` (on disk) instead of `/tmp` (often tmpfs = RAM) for local restore temp directory — prevents OOM when extracting large snapshots on gateways with limited RAM
+- **Restore test**: check gateway disk space on `/var/tmp` during pre-flight (minimum 2 GB)
+
 ## [1.22.3] - 2026-03-14
 
 ### Improved
