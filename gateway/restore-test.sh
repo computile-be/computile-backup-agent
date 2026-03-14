@@ -1224,26 +1224,6 @@ phase1_preflight() {
         die "Cannot connect to target VM. Aborting."
     fi
 
-    # Check SSH user's home directory — MUST be in /tmp to survive restore
-    if ! $DRY_RUN; then
-        local ssh_home
-        ssh_home=$(_ssh_target "eval echo ~${SSH_USER}" 2>/dev/null || true)
-        if [[ -n "$ssh_home" ]]; then
-            if [[ "$ssh_home" == /tmp/* || "$ssh_home" == "/tmp" ]]; then
-                report_ok "SSH user home: ${ssh_home} (safe from restore)"
-            else
-                report_ko "SSH user '${SSH_USER}' home is '${ssh_home}' — must be under /tmp"
-                log_error "The restore overwrites /home, /etc, /root, etc. The SSH user's home"
-                log_error "directory must be under /tmp to survive. Recreate the user with:"
-                log_error "  sudo userdel ${SSH_USER}"
-                log_error "  sudo useradd -r -m -d /tmp/${SSH_USER} -s /bin/bash ${SSH_USER}"
-                die "SSH user home directory is not safe for restore. Aborting."
-            fi
-        else
-            report_warn "Could not determine SSH user home directory"
-        fi
-    fi
-
     # Check target OS
     if ! $DRY_RUN; then
         local os_info

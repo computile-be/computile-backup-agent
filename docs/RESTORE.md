@@ -366,25 +366,21 @@ L'outil `computile-restore-test` permet de valider qu'un backup est fonctionnel 
 
 ### Préparation du VM cible
 
-L'outil utilise par défaut l'utilisateur `computile-restore` sur la cible. Deux options :
-
-**Option 1 : Utilisateur pré-créé (recommandé)**
-
-Créer l'utilisateur `computile-restore` sur le VM cible avant le test :
+L'outil utilise par défaut l'utilisateur `computile-restore` sur la cible. Cet utilisateur doit être pré-créé avant le test :
 
 ```bash
 # Sur le VM cible
-sudo useradd -r -m -d /tmp/computile-restore -s /bin/bash computile-restore
+sudo useradd -r -m -s /bin/bash computile-restore
 echo "computile-restore ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/computile-restore
 sudo chmod 440 /etc/sudoers.d/computile-restore
 
 # Copier la clé SSH de la gateway
-sudo mkdir -p /tmp/computile-restore/.ssh
-sudo cp ~/.ssh/authorized_keys /tmp/computile-restore/.ssh/  # ou ajouter la clé de la gateway
-sudo chown -R computile-restore:computile-restore /tmp/computile-restore
+sudo mkdir -p /home/computile-restore/.ssh
+sudo cp ~/.ssh/authorized_keys /home/computile-restore/.ssh/  # ou ajouter la clé de la gateway
+sudo chown -R computile-restore:computile-restore /home/computile-restore
 ```
 
-> **Pourquoi `/tmp` comme home ?** Pendant le restore, rsync écrase `/home` et `/etc` avec les données du backup. Un utilisateur classique (home dans `/home`) verrait son répertoire et ses credentials remplacés, cassant la connexion SSH. Le home dans `/tmp` est hors du périmètre de restore.
+> **Note** : le rsync n'utilise pas `--delete`, donc le dossier `/home/computile-restore` (absent du backup) n'est pas touché. L'outil sauvegarde l'identité SSH du user avant le restore et la ré-injecte automatiquement après chaque rsync via un script fixup.
 
 ### Usage interactif (TUI)
 

@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.32.1] - 2026-03-14
+
+### Changed
+- **Restore test**: remove pre-flight home directory check — `/home/computile-restore` is safe because rsync has no `--delete` flag and the fixup re-injects the user after each rsync
+- **Docs**: update `RESTORE.md` to use standard `/home` for `computile-restore` user
+
 ## [1.32.0] - 2026-03-14
 
 ### Added
