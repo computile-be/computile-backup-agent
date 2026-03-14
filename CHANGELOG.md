@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.20.2] - 2026-03-14
+
+### Fixed
+- **Restore test**: capture and log restic restore and rsync error output — errors are now visible in both console and report instead of silent "[KO] Restic restore failed"
+
 ## [1.20.1] - 2026-03-14
 
 ### Improved

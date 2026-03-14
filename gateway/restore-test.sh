@@ -862,7 +862,11 @@ phase2_restore_files() {
     local restore_start
     restore_start=$(date +%s)
 
-    if restic restore --no-lock "$SNAPSHOT_ID" --target "$TEMP_RESTORE_DIR" 2>&1; then
+    local restic_output
+    local restic_rc=0
+    restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" --target "$TEMP_RESTORE_DIR" 2>&1) || restic_rc=$?
+
+    if [[ $restic_rc -eq 0 ]]; then
         local restore_end
         restore_end=$(date +%s)
         local restore_duration=$((restore_end - restore_start))
@@ -874,7 +878,9 @@ phase2_restore_files() {
         restored_human=$(_human_size "${restored_bytes:-0}")
         report_ok "Restic restore: ${restored_human} extracted ($(_format_duration $restore_duration))"
     else
-        report_ko "Restic restore failed"
+        log_error "Restic restore failed (exit code: $restic_rc)"
+        log_error "Output: ${restic_output}"
+        report_ko "Restic restore failed: ${restic_output}"
         return 1
     fi
 
@@ -891,16 +897,21 @@ phase2_restore_files() {
     local rsync_start
     rsync_start=$(date +%s)
 
-    if rsync -az --info=progress2 \
+    local rsync_output
+    local rsync_rc=0
+    rsync_output=$(rsync -az --info=progress2 \
         -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}" \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1; then
+        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
 
+    if [[ $rsync_rc -eq 0 ]]; then
         local rsync_end
         rsync_end=$(date +%s)
         local rsync_duration=$((rsync_end - rsync_start))
         report_ok "Rsync to target ($(_format_duration $rsync_duration))"
     else
-        report_ko "Rsync to target failed"
+        log_error "Rsync failed (exit code: $rsync_rc)"
+        log_error "Output: ${rsync_output}"
+        report_ko "Rsync to target failed: ${rsync_output}"
         return 1
     fi
 }
