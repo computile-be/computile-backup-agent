@@ -974,6 +974,17 @@ phase0_select() {
 
         # Show SSH key and ask user to confirm it's on the target
         _tui_ssh_key_check || exit 1
+
+        # Options
+        local mode
+        mode=$($DIALOG --title "Restore Test — Transfer Mode" \
+            --menu "Choose the file transfer mode:" 14 $WT_WIDTH 3 \
+            "streaming"    "Streaming (restic dump | ssh tar) — fast, no local writes" \
+            "no-streaming" "Extract+rsync — slower, writes to gateway disk" \
+            3>&1 1>&2 2>&3) || exit 1
+        if [[ "$mode" == "no-streaming" ]]; then
+            NO_STREAMING=true
+        fi
     fi
 
     # Validate required parameters
