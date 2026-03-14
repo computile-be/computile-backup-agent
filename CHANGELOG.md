@@ -4,6 +4,17 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.32.0] - 2026-03-14
+
+### Added
+- **Restore test**: pre-flight check verifies SSH user's home is under `/tmp` — aborts with clear instructions if home is in `/home` or other backed-up path
+- **Restore test**: save and restore PAM, nsswitch, shells, login.defs on target during SSH fixup — prevents broken SSH sessions after `/etc` rsync replaces authentication config
+
+### Changed
+- **Restore test**: restore order now puts `/etc` second-to-last (before `/data`) — all safe paths are rsynced first while SSH is functional
+- **Restore test**: SSH re-establishment after EACH rsync (not just at the end) — if ControlMaster dies after sshd reload, the connection is rebuilt with a fresh ControlMaster before the next path
+- **Restore test**: use `systemctl reload sshd` instead of `restart` in fixup — keeps existing SSH connections alive
+
 ## [1.31.2] - 2026-03-14
 
 ### Changed

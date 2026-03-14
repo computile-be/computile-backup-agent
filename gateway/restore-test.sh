@@ -331,12 +331,23 @@ if [ -f "$SAVE_DIR/authorized_keys" ]; then
     chown "${USER_UID}:${USER_GID}" "${USER_HOME}/.ssh/authorized_keys"
 fi
 
+# Restore PAM + nsswitch (critical for SSH session creation)
+if [ -d "$SAVE_DIR/pam" ]; then
+    cp "$SAVE_DIR/pam/nsswitch.conf" /etc/nsswitch.conf 2>/dev/null || true
+    cp "$SAVE_DIR/pam/shells" /etc/shells 2>/dev/null || true
+    cp "$SAVE_DIR/pam/login.defs" /etc/login.defs 2>/dev/null || true
+    if [ -d "$SAVE_DIR/pam/pam.d" ]; then
+        cp -a "$SAVE_DIR/pam/pam.d"/* /etc/pam.d/ 2>/dev/null || true
+    fi
+fi
+
 # Always restore SSH host keys + sshd config (so gateway can reconnect)
 if [ -d "$SAVE_DIR/ssh" ]; then
     cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
     cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
-    # Restart sshd to pick up restored host keys
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+    # Reload sshd (keeps existing connections alive, unlike restart)
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 fi
 FIXUP_SCRIPT
 
@@ -1213,6 +1224,26 @@ phase1_preflight() {
         die "Cannot connect to target VM. Aborting."
     fi
 
+    # Check SSH user's home directory — MUST be in /tmp to survive restore
+    if ! $DRY_RUN; then
+        local ssh_home
+        ssh_home=$(_ssh_target "eval echo ~${SSH_USER}" 2>/dev/null || true)
+        if [[ -n "$ssh_home" ]]; then
+            if [[ "$ssh_home" == /tmp/* || "$ssh_home" == "/tmp" ]]; then
+                report_ok "SSH user home: ${ssh_home} (safe from restore)"
+            else
+                report_ko "SSH user '${SSH_USER}' home is '${ssh_home}' — must be under /tmp"
+                log_error "The restore overwrites /home, /etc, /root, etc. The SSH user's home"
+                log_error "directory must be under /tmp to survive. Recreate the user with:"
+                log_error "  sudo userdel ${SSH_USER}"
+                log_error "  sudo useradd -r -m -d /tmp/${SSH_USER} -s /bin/bash ${SSH_USER}"
+                die "SSH user home directory is not safe for restore. Aborting."
+            fi
+        else
+            report_warn "Could not determine SSH user home directory"
+        fi
+    fi
+
     # Check target OS
     if ! $DRY_RUN; then
         local os_info
@@ -1559,6 +1590,13 @@ echo "\${home}" > "\$SAVE_DIR/home_dir"
 # SSH host keys (preserve sshd identity so gateway can reconnect)
 cp /etc/ssh/ssh_host_* "\$SAVE_DIR/ssh/" 2>/dev/null || true
 cp /etc/ssh/sshd_config "\$SAVE_DIR/ssh/" 2>/dev/null || true
+
+# PAM + nsswitch (critical for SSH session creation after /etc rsync)
+mkdir -p "\$SAVE_DIR/pam"
+cp /etc/nsswitch.conf "\$SAVE_DIR/pam/" 2>/dev/null || true
+cp /etc/shells "\$SAVE_DIR/pam/" 2>/dev/null || true
+cp /etc/login.defs "\$SAVE_DIR/pam/" 2>/dev/null || true
+cp -a /etc/pam.d "\$SAVE_DIR/pam/" 2>/dev/null || true
 SAVE_EOF
         log_info "  Saved: user entry, groups, authorized_keys, host keys"
         log_info "  Deploying SSH fixup script on target..."
@@ -1648,16 +1686,23 @@ SAVE_EOF
     local total_paths=${#paths[@]}
     log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
 
-    # Sort paths: /data last to minimize risk of SSH breakage from Coolify files
+    # Sort paths: /etc second-to-last and /data last.
+    # /etc must be restored AFTER /home, /opt, etc. because rsync of /etc replaces
+    # PAM, nsswitch, sshd config — which breaks new SSH channels through ControlMaster.
+    # By doing /etc near the end, all other paths are already restored when SSH breaks.
     local -a sorted_paths=()
     local data_path=""
+    local etc_path=""
     for path in "${paths[@]}"; do
         if [[ "$path" == "/data" || "$path" == "/data/"* ]]; then
             data_path="$path"
+        elif [[ "$path" == "/etc" || "$path" == "/etc/"* ]]; then
+            etc_path="$path"
         else
             sorted_paths+=("$path")
         fi
     done
+    [[ -n "$etc_path" ]] && sorted_paths+=("$etc_path")
     [[ -n "$data_path" ]] && sorted_paths+=("$data_path")
     paths=("${sorted_paths[@]}")
     log_info "Restore order: ${paths[*]}"
@@ -1684,32 +1729,49 @@ SAVE_EOF
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
-        # _restore_and_sync_path returns 1 if SSH is broken — abort remaining paths
-        if ! _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0; then
-            log_error "Aborting remaining paths due to SSH connectivity loss"
-            break
+        _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0
+
+        # After each rsync, check if SSH is still alive and re-establish if needed.
+        # The rsync wrapper runs the fixup inline (re-injects user + restores host keys),
+        # but sshd restart may kill the ControlMaster. Re-establish before next path.
+        if ! _ssh_target true 2>/dev/null; then
+            log_info "SSH broken after $path — re-establishing connection..."
+            _cleanup_ssh_control
+            ssh-keygen -R "$TARGET" 2>/dev/null || true
+            ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
+            local ssh_ok=false
+            for attempt in 1 2 3 4 5; do
+                sleep 2
+                if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o ConnectTimeout=5 -o BatchMode=yes \
+                    -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                    _setup_ssh_control
+                    if _ssh_target true 2>/dev/null; then
+                        ssh_ok=true
+                        # Rebuild rsync command with new ControlMaster socket
+                        rsync_rsh=$(_rsync_ssh_cmd)
+                        rsync_opts=(-az -e "$rsync_rsh")
+                        if $fixup_ok; then
+                            rsync_opts+=(--rsync-path="sudo /tmp/computile-rsync-wrapper.sh")
+                        elif [[ "$SSH_USER" != "root" ]]; then
+                            rsync_opts+=(--rsync-path="sudo rsync")
+                        fi
+                        rsync_opts+=(
+                            --exclude='data/coolify/ssh/keys/'
+                            --exclude='data/coolify/ssh/id.*'
+                        )
+                        log_info "SSH re-established after $path"
+                        break
+                    fi
+                    _cleanup_ssh_control
+                fi
+            done
+            if ! $ssh_ok; then
+                log_error "Could not re-establish SSH after $path — aborting remaining paths"
+                break
+            fi
         fi
     done
-
-    # Re-establish SSH if the ControlMaster went stale after fixup sshd restarts.
-    # The rsync wrapper ran the fixup inline, so the restore user should exist
-    # in /etc/passwd. We just need to refresh the ControlMaster.
-    if ! _ssh_target true 2>/dev/null; then
-        log_info "Re-establishing SSH after restore (fixup restarted sshd)..."
-        _cleanup_ssh_control
-        ssh-keygen -R "$TARGET" 2>/dev/null || true
-        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
-        for attempt in 1 2 3 4 5; do
-            sleep 2
-            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=5 -o BatchMode=yes \
-                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
-                _setup_ssh_control
-                _ssh_target true 2>/dev/null && break
-                _cleanup_ssh_control
-            fi
-        done
-    fi
 
     # Cleanup temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
