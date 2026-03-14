@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.23.0] - 2026-03-14
+
+### Improved
+- **Restore test**: live progress monitor during restic restore — shows extracted size every 5 seconds (e.g., `progress: 1.2G extracted...`) instead of silent wait
+- **Restore test**: rsync shows transferred size in the log line and streams `--info=progress2` output in real-time
+
 ## [1.22.6] - 2026-03-14
 
 ### Improved

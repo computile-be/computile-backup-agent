@@ -874,11 +874,29 @@ _restore_and_sync_path() {
     # Clean temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
 
+    # Run restic in background with a progress monitor
     local restic_log="${TEMP_RESTORE_DIR}.restic.log"
-    local restic_rc=0
-    restic restore --no-lock --verbose "$SNAPSHOT_ID" \
+    restic restore --no-lock "$SNAPSHOT_ID" \
         --target "$TEMP_RESTORE_DIR" --include "$path" \
-        > >(tee "$restic_log") 2>&1 || restic_rc=$?
+        >"$restic_log" 2>&1 &
+    local restic_pid=$!
+
+    # Progress monitor: show extracted size every 5 seconds
+    local last_size=""
+    while kill -0 "$restic_pid" 2>/dev/null; do
+        sleep 5
+        if [[ -d "$TEMP_RESTORE_DIR" ]]; then
+            local cur_size
+            cur_size=$(du -sh "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+            if [[ -n "$cur_size" && "$cur_size" != "$last_size" ]]; then
+                log_info "${indent}    progress: ${cur_size} extracted..."
+                last_size="$cur_size"
+            fi
+        fi
+    done
+
+    local restic_rc=0
+    wait "$restic_pid" || restic_rc=$?
     local restic_output
     restic_output=$(cat "$restic_log" 2>/dev/null) || true
     rm -f "$restic_log"
@@ -934,8 +952,10 @@ _restore_and_sync_path() {
     total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
     log_info "${indent}  Extracted: $(_human_size "${path_bytes:-0}")"
 
-    # Rsync to target
-    log_info "${indent}  Syncing $path to target..."
+    # Rsync to target with progress
+    local path_human
+    path_human=$(_human_size "${path_bytes:-0}")
+    log_info "${indent}  Syncing $path to target (${path_human})..."
     local rsync_log="${TEMP_RESTORE_DIR}.rsync.log"
     local rsync_rc=0
     rsync "${rsync_opts[@]}" --info=progress2 \
