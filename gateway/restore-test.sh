@@ -1414,13 +1414,15 @@ _restore_and_sync_path() {
         ssh-keygen -R "$TARGET" 2>/dev/null || true
         ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
         # Wait for the watchdog (polls every 2s) to re-inject the user + restart sshd
+        # Use UserKnownHostsFile=/dev/null to avoid host key caching issues during retries:
+        # the host key may flip between backup and original as the watchdog restores it
         local ssh_ok=false
         for attempt in 1 2 3 4 5 6 7 8 9 10; do
             sleep 3
-            # Try direct SSH without ControlMaster, accept any host key
-            if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=5 -o BatchMode=yes \
                 -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
-                # Re-establish ControlMaster now that SSH works
+                # SSH works — re-establish ControlMaster with proper host key check
                 _setup_ssh_control
                 if _ssh_target true 2>/dev/null; then
                     ssh_ok=true
