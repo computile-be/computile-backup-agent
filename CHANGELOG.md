@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.28.0] - 2026-03-14
+
+### Added
+- **Restore test**: pre-flight RAM check — warns if target VM has less than 4 GB (recommend for Coolify restores) or less than 2 GB (risk of OOM/heavy swap)
+
 ## [1.27.0] - 2026-03-14
 
 ### Added

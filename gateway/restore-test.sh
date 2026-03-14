@@ -972,6 +972,27 @@ phase1_preflight() {
         report_ok "Disk space check (dry-run)"
     fi
 
+    # Check target memory
+    if ! $DRY_RUN; then
+        local total_mem_kb
+        total_mem_kb=$(_ssh_target "grep '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print \$2}'" || echo "0")
+        if [[ "$total_mem_kb" =~ ^[0-9]+$ && "$total_mem_kb" -gt 0 ]]; then
+            local total_mem_mb=$((total_mem_kb / 1024))
+            local total_mem_gb=$(awk "BEGIN {printf \"%.1f\", ${total_mem_kb}/1048576}")
+            if [[ $total_mem_mb -ge 4096 ]]; then
+                report_ok "Memory: ${total_mem_gb} GB"
+            elif [[ $total_mem_mb -ge 2048 ]]; then
+                report_warn "Memory: ${total_mem_gb} GB (recommend 4 GB+ for Coolify restores)"
+            else
+                report_warn "Memory: ${total_mem_gb} GB (low — may cause OOM or heavy swap during restore)"
+            fi
+        else
+            report_warn "Could not determine target memory"
+        fi
+    else
+        report_ok "Memory check (dry-run)"
+    fi
+
     # Check gateway disk space (for local restore before rsync)
     if ! $DRY_RUN; then
         local gw_avail_kb
