@@ -11,7 +11,15 @@
 set -euo pipefail
 
 readonly BACKUP_BASE="/srv/backups"
-readonly STALE_THRESHOLD_DAYS=2  # Alert if no backup activity in N days
+readonly GATEWAY_CONFIG="/etc/computile-backup/gateway.conf"
+
+# Defaults (can be overridden by gateway.conf)
+STALE_THRESHOLD_DAYS=2
+DISK_WARN_PERCENT=85
+DISK_CRITICAL_PERCENT=95
+GATEWAY_HEALTHCHECK_URL=""
+GATEWAY_WEBHOOK_URL=""
+GATEWAY_WEBHOOK_HEADERS=()
 
 # ──────────────────────────────────────────────
 # Check dependencies
@@ -2061,6 +2069,211 @@ main_menu() {
 }
 
 # ──────────────────────────────────────────────
+# Gateway config loading
+# ──────────────────────────────────────────────
+_load_gateway_config() {
+    if [[ -f "$GATEWAY_CONFIG" ]]; then
+        # shellcheck source=/dev/null
+        source "$GATEWAY_CONFIG" 2>/dev/null || true
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Monitor & alert (--monitor)
+# ──────────────────────────────────────────────
+# Runs all health checks, collects alerts, and sends notifications
+# via healthcheck URL and/or webhook. Designed for cron.
+monitor_and_alert() {
+    _load_gateway_config
+
+    local -a alerts=()  # "severity|message" pairs
+    local now
+    now=$(date +%s)
+
+    # --- Check 1: SMB mount ---
+    if ! mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
+        alerts+=("critical|Storage mount ${BACKUP_BASE} is down")
+    else
+        # --- Check 2: Disk space ---
+        local disk_pct
+        disk_pct=$(df "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}') || true
+        if [[ -n "$disk_pct" ]]; then
+            if [[ $disk_pct -ge $DISK_CRITICAL_PERCENT ]]; then
+                alerts+=("critical|Disk usage at ${disk_pct}% on ${BACKUP_BASE}")
+            elif [[ $disk_pct -ge $DISK_WARN_PERCENT ]]; then
+                alerts+=("warning|Disk usage at ${disk_pct}% on ${BACKUP_BASE}")
+            fi
+        fi
+    fi
+
+    # --- Check 3: SSH service ---
+    if ! systemctl is-active sshd &>/dev/null && ! systemctl is-active ssh &>/dev/null; then
+        alerts+=("critical|SSH service is not running")
+    fi
+
+    # --- Check 4: fail2ban ---
+    if command -v fail2ban-client &>/dev/null; then
+        if ! systemctl is-active fail2ban &>/dev/null; then
+            alerts+=("warning|fail2ban is not running")
+        fi
+    fi
+
+    # --- Check 5: Stale backups ---
+    local stale_secs=$(( STALE_THRESHOLD_DAYS * 86400 ))
+    local critical_secs=$(( stale_secs * 3 ))
+
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        local data_dir="${BACKUP_BASE}/${client}/data"
+
+        if [[ ! -d "$data_dir" ]]; then
+            alerts+=("warning|${display}: data directory missing")
+            continue
+        fi
+
+        local last_epoch
+        last_epoch=$(get_last_activity_epoch "$data_dir")
+
+        if [[ -z "$last_epoch" ]] || [[ "$last_epoch" == "0" ]]; then
+            alerts+=("warning|${display}: never backed up")
+            continue
+        fi
+
+        local age_secs=$(( now - last_epoch ))
+        local age_days=$(( age_secs / 86400 ))
+
+        if [[ $age_secs -gt $critical_secs ]]; then
+            alerts+=("critical|${display}: last backup ${age_days}d ago (critical)")
+        elif [[ $age_secs -gt $stale_secs ]]; then
+            alerts+=("warning|${display}: last backup ${age_days}d ago (stale)")
+        fi
+    done < <(list_clients)
+
+    # --- Check 6: Stale restic locks ---
+    if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
+        while IFS= read -r client; do
+            [[ -z "$client" ]] && continue
+            local data_dir="${BACKUP_BASE}/${client}/data"
+            [[ -d "$data_dir" ]] || continue
+
+            for vps_dir in "$data_dir"/*/; do
+                [[ -d "$vps_dir" ]] || continue
+                local lock_dir="${vps_dir}locks"
+                [[ -d "$lock_dir" ]] || continue
+
+                for lock_file in "$lock_dir"/*; do
+                    [[ -f "$lock_file" ]] || continue
+                    local lock_age
+                    lock_age=$(( now - $(stat -c '%Y' "$lock_file" 2>/dev/null || echo "$now") ))
+                    if [[ $lock_age -gt 3600 ]]; then
+                        local lock_hours=$(( lock_age / 3600 ))
+                        local vps_name
+                        vps_name=$(basename "$(dirname "$lock_dir")")
+                        alerts+=("warning|${client#backup-}/${vps_name}: stale lock (${lock_hours}h old)")
+                    fi
+                done
+            done
+        done < <(list_clients)
+    fi
+
+    # --- Determine overall status ---
+    local status="ok"
+    local critical_count=0
+    local warning_count=0
+
+    for alert in "${alerts[@]+"${alerts[@]}"}"; do
+        case "${alert%%|*}" in
+            critical) ((critical_count++)) || true ;;
+            warning)  ((warning_count++)) || true ;;
+        esac
+    done
+
+    if [[ $critical_count -gt 0 ]]; then
+        status="critical"
+    elif [[ $warning_count -gt 0 ]]; then
+        status="warning"
+    fi
+
+    # --- Build summary ---
+    local summary=""
+    local hostname
+    hostname=$(hostname -f 2>/dev/null || hostname)
+
+    if [[ ${#alerts[@]} -eq 0 ]]; then
+        summary="All checks passed on ${hostname}"
+        echo "[OK] ${summary}"
+    else
+        summary="${critical_count} critical, ${warning_count} warning on ${hostname}"
+        for alert in "${alerts[@]}"; do
+            local severity="${alert%%|*}"
+            local message="${alert#*|}"
+            local tag
+            tag=$(echo "$severity" | tr '[:lower:]' '[:upper:]')
+            echo "[${tag}] ${message}"
+        done
+        echo "---"
+        echo "Summary: ${summary}"
+    fi
+
+    # --- Send healthcheck ping ---
+    if [[ -n "$GATEWAY_HEALTHCHECK_URL" ]]; then
+        local hc_url="$GATEWAY_HEALTHCHECK_URL"
+        if [[ "$status" != "ok" ]]; then
+            hc_url="${hc_url}/fail"
+        fi
+        curl -fsS --max-time 10 --retry 3 \
+            -X POST --data-raw "${summary}" \
+            "$hc_url" >/dev/null 2>&1 || \
+            echo "[WARN] Healthcheck ping failed" >&2
+    fi
+
+    # --- Send webhook ---
+    if [[ -n "$GATEWAY_WEBHOOK_URL" ]] && [[ "$status" != "ok" ]]; then
+        # Build JSON payload
+        local alerts_json="["
+        local first=true
+        for alert in "${alerts[@]}"; do
+            local severity="${alert%%|*}"
+            local message="${alert#*|}"
+            # Escape quotes in message
+            message="${message//\"/\\\"}"
+            if ! $first; then alerts_json+=","; fi
+            alerts_json+="{\"severity\":\"${severity}\",\"message\":\"${message}\"}"
+            first=false
+        done
+        alerts_json+="]"
+
+        local payload
+        payload=$(cat <<PEOF
+{"status":"${status}","hostname":"${hostname}","alerts":${alerts_json},"summary":"${summary//\"/\\\"}","timestamp":"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"}
+PEOF
+        )
+
+        # Build curl headers
+        local -a curl_headers=()
+        curl_headers+=("-H" "Content-Type: application/json")
+        for hdr in "${GATEWAY_WEBHOOK_HEADERS[@]+"${GATEWAY_WEBHOOK_HEADERS[@]}"}"; do
+            [[ -n "$hdr" ]] && curl_headers+=("-H" "$hdr")
+        done
+
+        curl -fsS --max-time 10 --retry 3 \
+            "${curl_headers[@]}" \
+            -X POST --data-raw "$payload" \
+            "$GATEWAY_WEBHOOK_URL" >/dev/null 2>&1 || \
+            echo "[WARN] Webhook notification failed" >&2
+    fi
+
+    # Exit code: 0 = ok, 1 = warnings, 2 = critical
+    if [[ $critical_count -gt 0 ]]; then
+        return 2
+    elif [[ $warning_count -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -2084,16 +2297,21 @@ case "${1:-}" in
         generate_report "json"
         exit 0
         ;;
+    --monitor)
+        # Run all health checks and send notifications
+        monitor_and_alert
+        exit $?
+        ;;
     --help|-h)
         cat <<'HELP'
 computile-gateway-manager — TUI manager for the backup gateway
 
 Usage:
   sudo computile-gateway-manager                 # Interactive TUI
-  sudo computile-gateway-manager --check-alerts   # Non-interactive alert check (for cron)
+  sudo computile-gateway-manager --monitor        # Run health checks + send alerts (for cron)
+  sudo computile-gateway-manager --check-alerts   # Print stale backup alerts (for cron)
   sudo computile-gateway-manager --report         # Full health report (text)
-  sudo computile-gateway-manager --report json    # Full health report (JSON)
-  sudo computile-gateway-manager --report-json    # Full health report (JSON, shorthand)
+  sudo computile-gateway-manager --report-json    # Full health report (JSON)
 
 Interactive features:
   - Client overview: all clients, snapshot counts, last activity
@@ -2110,14 +2328,20 @@ Interactive features:
   - Auth log viewer
 
 Non-interactive modes:
+  --monitor         Run all health checks, send healthcheck ping + webhook on problems
+                    Config: /etc/computile-backup/gateway.conf
+                    Checks: SMB mount, disk space, SSH, fail2ban, stale backups, stuck locks
+                    Exit codes: 0=ok, 1=warning, 2=critical
   --check-alerts    Prints alerts for stale/missing backups, exits 1 if any
   --report          Full health report (text format, to stdout)
-  --report json     Full health report (JSON format)
-  --report-json     Shorthand for --report json
+  --report-json     Full health report (JSON format)
 
 Examples:
+  # Health monitoring every 15 min with healthcheck.io + webhook
+  */15 * * * * /usr/local/bin/computile-gateway-manager --monitor 2>&1 | logger -t computile-gw
+  # Simple alert check with email
   0 8 * * * /usr/local/bin/computile-gateway-manager --check-alerts || mail -s "Backup alerts" admin@example.com
-  computile-gateway-manager --report > /tmp/gateway-report.txt
+  # JSON report for monitoring integration
   computile-gateway-manager --report-json | curl -X POST -d @- https://monitoring.example.com/api/gateway
 HELP
         exit 0

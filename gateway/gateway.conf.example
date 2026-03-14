@@ -1,0 +1,38 @@
+# ================================================================
+# computile-backup — Gateway configuration
+#
+# Copy to /etc/computile-backup/gateway.conf and edit.
+# Used by: computile-gateway-manager --monitor
+# ================================================================
+
+# ----------------------------------------------
+# Monitoring thresholds
+# ----------------------------------------------
+# Days without backup before a client is considered stale
+# STALE_THRESHOLD_DAYS=2
+
+# Disk usage percent thresholds
+# DISK_WARN_PERCENT=85
+# DISK_CRITICAL_PERCENT=95
+
+# ----------------------------------------------
+# Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
+# ----------------------------------------------
+# Pings URL on success, URL/fail on problems.
+# Leave empty to disable.
+# GATEWAY_HEALTHCHECK_URL="https://hc-ping.com/your-uuid-here"
+
+# ----------------------------------------------
+# Webhook notifications (Slack, Discord, ntfy, etc.)
+# ----------------------------------------------
+# POST JSON payload on problems. Leave empty to disable.
+# Payload: {"status":"critical|warning|ok", "hostname":"...",
+#           "alerts":[{"severity":"critical|warning","message":"..."}],
+#           "summary":"..."}
+# GATEWAY_WEBHOOK_URL=""
+#
+# Optional: extra headers (one per line, Name: Value format)
+# Useful for auth tokens, ntfy topics, etc.
+# GATEWAY_WEBHOOK_HEADERS=(
+#     "Authorization: Bearer your-token"
+# )

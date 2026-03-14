@@ -4,6 +4,18 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.9.0] - 2026-03-14
+
+### Added
+- **Gateway monitoring with alerts** (`--monitor`): new non-interactive mode that runs all health checks and sends notifications via healthcheck URL and/or webhook — designed for cron
+  - Checks: SMB mount, disk space (configurable thresholds), SSH, fail2ban, stale backups, stuck restic locks
+  - Healthcheck ping (healthchecks.io, Uptime Kuma): success/fail based on overall status
+  - Webhook (Slack, Discord, ntfy, custom): POST JSON with severity, alerts list, and summary
+  - Exit codes: 0=ok, 1=warning, 2=critical
+- **Gateway config file** (`/etc/computile-backup/gateway.conf`): configurable thresholds and notification endpoints
+  - `GATEWAY_HEALTHCHECK_URL`, `GATEWAY_WEBHOOK_URL`, `GATEWAY_WEBHOOK_HEADERS`
+  - `STALE_THRESHOLD_DAYS`, `DISK_WARN_PERCENT`, `DISK_CRITICAL_PERCENT`
+
 ## [1.8.4] - 2026-03-14
 
 ### Fixed

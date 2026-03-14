@@ -256,6 +256,18 @@ install_gateway_scripts() {
 
     # Record source repo path for future updates
     echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
+
+    # Gateway config (don't overwrite existing)
+    local gw_config="/etc/computile-backup/gateway.conf"
+    mkdir -p /etc/computile-backup
+    if [[ ! -f "$gw_config" ]]; then
+        if [[ -f "${SCRIPT_DIR}/gateway.conf.example" ]]; then
+            install -m 0600 "${SCRIPT_DIR}/gateway.conf.example" "$gw_config"
+            info "Gateway config installed: $gw_config (edit to enable monitoring)"
+        fi
+    else
+        info "Gateway config already exists: $gw_config (not overwritten)"
+    fi
 }
 
 # ──────────────────────────────────────────────
