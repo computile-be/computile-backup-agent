@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.3] - 2026-03-14
+
+### Improved
+- **Restore test**: on interrupt (Ctrl+C) or error, generate a partial report with all checks completed so far, clean up temp directory, and show a clear "interrupted" message
+
 ## [1.22.2] - 2026-03-14
 
 ### Fixed

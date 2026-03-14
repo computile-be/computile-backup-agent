@@ -1637,11 +1637,33 @@ phase6_cleanup() {
     fi
 }
 
+INTERRUPTED=false
+
 cleanup_on_exit() {
+    local exit_code=$?
+
+    # On interrupt (Ctrl+C), generate partial report
+    if [[ $INTERRUPTED == true || $exit_code -ne 0 ]]; then
+        if [[ -n "$START_TIME" && -n "$CLIENT" ]]; then
+            echo ""
+            log_warn "Restore test interrupted (exit code: $exit_code)"
+            report_ko "Test interrupted (signal/error, exit code: $exit_code)"
+            report_generate
+        fi
+    fi
+
     # Always clean up temp dir on gateway (unless --skip-cleanup)
     if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" && "$SKIP_CLEANUP" != true ]]; then
+        log_info "Cleaning up temp directory: $TEMP_RESTORE_DIR"
         rm -rf "$TEMP_RESTORE_DIR"
     fi
+}
+
+_on_interrupt() {
+    INTERRUPTED=true
+    echo ""
+    log_warn "Caught interrupt signal — aborting..."
+    exit 130
 }
 
 # ──────────────────────────────────────────────
@@ -1666,8 +1688,9 @@ main() {
     # Parse arguments
     parse_args "$@"
 
-    # Setup cleanup trap
+    # Setup cleanup and interrupt traps
     trap cleanup_on_exit EXIT
+    trap _on_interrupt INT TERM
 
     START_TIME=$(date +%s)
 
