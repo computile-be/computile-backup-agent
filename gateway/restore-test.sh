@@ -419,6 +419,9 @@ cat > /tmp/computile-rsync-wrapper.sh <<'WRAPPER_SCRIPT'
 #!/bin/bash
 rsync "$@"
 RC=$?
+# Restore safe root directory permissions — restic may store / as 0700 which
+# rsync -a propagates to the target, making ALL binaries inaccessible.
+chmod 755 / 2>/dev/null || true
 /tmp/computile-ssh-fixup.sh 2>/dev/null || true
 exit $RC
 WRAPPER_SCRIPT
@@ -531,7 +534,7 @@ _stream_path_to_target() {
     # so it executes before the connection closes — no timing issues
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
+    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; chmod 755 / 2>/dev/null || true; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
 
     # Get target disk usage before streaming (for transferred bytes estimate)
     local before_used_kb
@@ -671,7 +674,7 @@ _stream_full_to_target() {
     # Build remote command: tar extract + inline SSH fixup
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
+    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; chmod 755 / 2>/dev/null || true; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
 
     # Get target disk usage before streaming (for transferred bytes estimate)
     local before_used_kb
@@ -1569,6 +1572,11 @@ _restore_and_sync_path() {
         failed_paths+=("$path")
         return
     fi
+
+    # Restic applies the snapshot root's metadata (permissions/owner) to the
+    # target dir ($TEMP_RESTORE_DIR).  If the backup's / was e.g. 0700, rsync -a
+    # would propagate that to / on the target — catastrophic for non-root users.
+    chmod 755 "$TEMP_RESTORE_DIR"
 
     # Calculate size
     local path_bytes
