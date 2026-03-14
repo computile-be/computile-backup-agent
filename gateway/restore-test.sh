@@ -497,14 +497,18 @@ _push_ssh_key_via_password() {
         return 1
     fi
 
-    # Push key using ssh-copy-id
-    log_info "Copying SSH key to ${SSH_USER}@${TARGET}:${SSH_PORT}..."
+    # Push key using ssh-copy-id (with 15s timeout)
+    log_info "Copying SSH key to ${SSH_USER}@${TARGET}:${SSH_PORT} (timeout: 15s)..."
     local output
-    if output=$(sshpass -p "$password" ssh-copy-id \
+    local copy_rc=0
+    output=$(timeout 15 sshpass -p "$password" ssh-copy-id \
         -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=10 \
         -p "$SSH_PORT" \
         -i "$key_file" \
-        "${SSH_USER}@${TARGET}" 2>&1); then
+        "${SSH_USER}@${TARGET}" 2>&1) || copy_rc=$?
+
+    if [[ $copy_rc -eq 0 ]]; then
         log_info "  -> ssh-copy-id succeeded"
         # Verify the connection actually works
         log_info "Verifying SSH connection with key authentication..."
@@ -518,17 +522,52 @@ _push_ssh_key_via_password() {
             log_info "  Status:      OK"
             _msg_box "Restore Test — SSH Key Deployed" \
                 "SSH key successfully copied and verified!\n\nTarget: ${SSH_USER}@${TARGET}\nKey: ${key_file}\nFingerprint: ${fingerprint}\n\nConnection test: OK"
+            return 0
         else
             log_error "  -> Connection FAILED after ssh-copy-id"
             _msg_box "Restore Test — Warning" \
                 "ssh-copy-id succeeded but connection test failed.\nCheck the target's SSH configuration."
             return 1
         fi
+    fi
+
+    # ssh-copy-id failed — fallback to manual instructions
+    if [[ $copy_rc -eq 124 ]]; then
+        log_warn "  -> ssh-copy-id timed out after 15s"
+    else
+        log_error "  -> ssh-copy-id failed (exit code: $copy_rc)"
+        [[ -n "$output" ]] && log_error "  Output: ${output}"
+    fi
+
+    local pub_key
+    pub_key=$(cat "${key_file}")
+
+    local fail_reason="Timed out after 15 seconds"
+    [[ $copy_rc -ne 124 ]] && fail_reason="Error: ${output}"
+
+    local msg="Automatic key copy failed.\n${fail_reason}\n\n"
+    msg+="Please add this key manually on ${SSH_USER}@${TARGET}:\n\n"
+    msg+="Key: ${key_file}\n"
+    msg+="Fingerprint: ${fingerprint}\n\n"
+    msg+="${pub_key}\n\n"
+    msg+="On the target, run:\n"
+    msg+="  mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+    msg+="  echo '${pub_key}' >> ~/.ssh/authorized_keys\n"
+    msg+="  chmod 600 ~/.ssh/authorized_keys\n\n"
+    msg+="Press OK once done."
+
+    _msg_box "Restore Test — Manual Fallback" "$msg"
+
+    # Verify after manual setup
+    log_info "Verifying SSH connection after manual key setup..."
+    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
+        -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+        log_info "  -> Connection verified OK"
+        _msg_box "Restore Test" "SSH key verified! Connection to ${SSH_USER}@${TARGET} is working."
         return 0
     else
-        log_error "  -> ssh-copy-id FAILED"
-        log_error "  Output: ${output}"
-        _msg_box "Restore Test — Error" "Failed to copy SSH key:\n\n${output}\n\nCheck the password and try again."
+        log_error "  -> Connection still FAILED"
+        _msg_box "Restore Test" "SSH connection still failing.\nCheck the key, user, and target SSH config."
         return 1
     fi
 }

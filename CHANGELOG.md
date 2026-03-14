@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.19.0] - 2026-03-14
+
+### Improved
+- **Restore test**: add 15s timeout on `ssh-copy-id` to prevent hanging on unreachable targets
+- **Restore test**: automatic fallback to manual key instructions when password-based copy fails or times out — displays the public key, fingerprint, and exact commands to run on the target
+
 ## [1.18.0] - 2026-03-14
 
 ### Improved
