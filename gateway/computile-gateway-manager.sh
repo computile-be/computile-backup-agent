@@ -754,10 +754,10 @@ manage_fail2ban() {
         local choice
         choice=$($DIALOG --title "Fail2ban — ${banned_count:-0} banned IP(s)" \
             --menu "Manage banned IPs:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
-            "status"    "View fail2ban status" \
-            "unban"     "Unban a specific IP" \
-            "unban-all" "Unban ALL IPs" \
-            "back"      "Back to main menu" \
+            "status"    "📊  View fail2ban status" \
+            "unban"     "🔓  Unban a specific IP" \
+            "unban-all" "🔓  Unban ALL IPs" \
+            "back"      "↩  Back to main menu" \
             3>&1 1>&2 2>&3) || break
 
         case "$choice" in
@@ -872,13 +872,13 @@ manage_users() {
         local choice
         choice=$($DIALOG --title "User Management" \
             --menu "Manage backup users:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
-            "list"      "List all backup users" \
-            "create"    "Create new backup user" \
-            "remove"    "Remove backup user" \
-            "keys"      "View SSH keys for a user" \
-            "addkey"    "Add SSH key to a user" \
-            "removekey" "Remove SSH key from a user" \
-            "back"      "Back to main menu" \
+            "list"      "📋  List all backup users" \
+            "create"    "➕  Create new backup user" \
+            "remove"    "🗑  Remove backup user" \
+            "keys"      "🔑  View SSH keys for a user" \
+            "addkey"    "🔑  Add SSH key to a user" \
+            "removekey" "🗑  Remove SSH key from a user" \
+            "back"      "↩  Back to main menu" \
             3>&1 1>&2 2>&3) || break
 
         case "$choice" in
@@ -2462,23 +2462,23 @@ main_menu() {
         local choice
         choice=$($DIALOG --title "$title" \
             --menu "Select an operation:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
-            "overview"   "Client overview (all clients)" \
-            "client"     "Inspect a specific client" \
-            "search"     "Search client by name" \
-            "sessions"   "Active SFTP sessions & locks" \
-            "alerts"     "Stale backup alerts" \
-            "sftp-test"  "Test SFTP setup for a client" \
-            "storage"    "Storage breakdown (sizes cached 1h)" \
-            "restore"    "Restore files from backup" \
-            "restore-test" "Test restore on a fresh VM" \
-            "clearcache" "Refresh size cache" \
-            "health"     "System health (SMB, SSH, fail2ban)" \
-            "tailscale"  "Tailscale peers (online/offline)" \
-            "fail2ban"   "Fail2ban: view/unban IPs" \
-            "logs"       "View auth logs" \
-            "users"      "User management" \
-            "update"     "Update gateway (git pull + install)" \
-            "quit"       "Quit" \
+            "overview"   "📊  Client overview (all clients)" \
+            "client"     "🔍  Inspect a specific client" \
+            "search"     "🔎  Search client by name" \
+            "sessions"   "⚡  Active SFTP sessions & locks" \
+            "alerts"     "🔔  Stale backup alerts" \
+            "sftp-test"  "🔗  Test SFTP setup for a client" \
+            "storage"    "💾  Storage breakdown (sizes cached 1h)" \
+            "restore"    "♻  Restore files from backup" \
+            "restore-test" "🧪  Test restore on a fresh VM" \
+            "clearcache" "🗑  Refresh size cache" \
+            "health"     "🏥  System health (SMB, SSH, fail2ban)" \
+            "tailscale"  "📡  Tailscale peers (online/offline)" \
+            "fail2ban"   "🛡  Fail2ban: view/unban IPs" \
+            "logs"       "📋  View auth logs" \
+            "users"      "👥  User management" \
+            "update"     "⬆  Update gateway (git pull + install)" \
+            "quit"       "❌  Quit" \
             3>&1 1>&2 2>&3) || break
 
         case "$choice" in
