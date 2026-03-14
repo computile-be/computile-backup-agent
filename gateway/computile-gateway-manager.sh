@@ -685,6 +685,28 @@ show_system_health() {
     fi
     output+="\n"
 
+    # Gateway SSH key (for restore test)
+    output+="GATEWAY SSH KEY (for restore test)\n"
+    local _gw_key_found=false
+    for _gw_kf in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
+        if [[ -f "$_gw_kf" ]]; then
+            local _gw_key
+            _gw_key=$(cat "$_gw_kf")
+            local _gw_fp
+            _gw_fp=$(ssh-keygen -lf "$_gw_kf" 2>/dev/null | awk '{print $1, $2, $NF}') || _gw_fp="N/A"
+            output+="  File: ${_gw_kf}\n"
+            output+="  Fingerprint: ${_gw_fp}\n"
+            output+="  Public key:\n"
+            output+="  ${_gw_key}\n"
+            _gw_key_found=true
+            break
+        fi
+    done
+    if [[ "$_gw_key_found" != true ]]; then
+        output+="  No SSH key found. Run setup_gateway.sh --update to generate one.\n"
+    fi
+    output+="\n"
+
     # System uptime & load
     output+="SYSTEM\n"
     output+="  $(uptime 2>/dev/null || echo 'N/A')\n"
