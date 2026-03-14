@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.16.0] - 2026-03-14
+
+### Improved
+- **Restore test**: add progress messages during Phase 0 (restic env setup, role detection) so the tool no longer appears stuck on slow repos
+- **Restore test**: optimize Coolify role detection with `head -1` pipe to avoid reading entire `restic ls` output
+
 ## [1.15.0] - 2026-03-14
 
 ### Added

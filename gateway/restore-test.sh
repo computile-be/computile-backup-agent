@@ -581,17 +581,20 @@ phase0_select() {
     [[ -z "$SNAPSHOT_ID" ]] && SNAPSHOT_ID="latest"
 
     # Set up restic env (may already be set in interactive mode)
+    log_info "Setting up restic environment..."
     _setup_restic_env
 
     # Detect role from backup config
+    log_info "Detecting VPS role..."
     _detect_role
 
-    log_info "Client:   $CLIENT"
-    log_info "VPS:      $VPS"
-    log_info "Snapshot: $SNAPSHOT_ID"
-    log_info "Target:   $TARGET"
-    log_info "Role:     ${ROLE:-unknown}"
-    log_info "SSH:      ${SSH_USER}@${TARGET}:${SSH_PORT}"
+    log_info "Configuration:"
+    log_info "  Client:   $CLIENT"
+    log_info "  VPS:      $VPS"
+    log_info "  Snapshot: $SNAPSHOT_ID"
+    log_info "  Target:   $TARGET"
+    log_info "  Role:     ${ROLE:-unknown}"
+    log_info "  SSH:      ${SSH_USER}@${TARGET}:${SSH_PORT}"
 }
 
 _setup_restic_env() {
@@ -617,9 +620,10 @@ _detect_role() {
         ROLE=$(grep -E '^ROLE=' "$config_file" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
     fi
 
-    # Fallback: check if /data/coolify exists in snapshot
+    # Fallback: check if /data/coolify exists in snapshot (can be slow)
     if [[ -z "$ROLE" ]]; then
-        if restic ls --no-lock "$SNAPSHOT_ID" /data/coolify 2>/dev/null | grep -q '/data/coolify'; then
+        log_info "  No ROLE in config, checking snapshot for Coolify (may take a moment)..."
+        if restic ls --no-lock "$SNAPSHOT_ID" /data/coolify 2>/dev/null | head -1 | grep -q '/data/coolify'; then
             ROLE="coolify"
         fi
     fi
