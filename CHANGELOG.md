@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.6] - 2026-03-14
+
+### Improved
+- **Restore test**: show real-time progress during restic restore (`--verbose`) and rsync (`--info=progress2`) — output streams to the terminal while still being captured for error reporting
+
 ## [1.22.5] - 2026-03-14
 
 ### Fixed

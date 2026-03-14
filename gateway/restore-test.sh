@@ -874,9 +874,14 @@ _restore_and_sync_path() {
     # Clean temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
 
-    local restic_output restic_rc=0
-    restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
-        --target "$TEMP_RESTORE_DIR" --include "$path" 2>&1) || restic_rc=$?
+    local restic_log="${TEMP_RESTORE_DIR}.restic.log"
+    local restic_rc=0
+    restic restore --no-lock --verbose "$SNAPSHOT_ID" \
+        --target "$TEMP_RESTORE_DIR" --include "$path" \
+        > >(tee "$restic_log") 2>&1 || restic_rc=$?
+    local restic_output
+    restic_output=$(cat "$restic_log" 2>/dev/null) || true
+    rm -f "$restic_log"
 
     # OOM (137) → split into sub-directories and retry recursively
     if [[ $restic_rc -eq 137 ]]; then
@@ -931,9 +936,14 @@ _restore_and_sync_path() {
 
     # Rsync to target
     log_info "${indent}  Syncing $path to target..."
-    local rsync_output rsync_rc=0
-    rsync_output=$(rsync "${rsync_opts[@]}" \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
+    local rsync_log="${TEMP_RESTORE_DIR}.rsync.log"
+    local rsync_rc=0
+    rsync "${rsync_opts[@]}" --info=progress2 \
+        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" \
+        > >(tee "$rsync_log") 2>&1 || rsync_rc=$?
+    local rsync_output
+    rsync_output=$(cat "$rsync_log" 2>/dev/null) || true
+    rm -f "$rsync_log"
 
     if [[ $rsync_rc -ne 0 ]]; then
         log_error "${indent}  Rsync failed for $path (exit code: $rsync_rc)"
