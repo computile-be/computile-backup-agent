@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.21.0] - 2026-03-14
+
+### Fixed
+- **Restore test**: restore each snapshot path individually (`--include`) instead of the entire snapshot at once — prevents OOM kill on low-memory gateways (512 MB RAM). Each path is restored, rsync'd to the target, then cleaned up before the next one. Paths are deduplicated (e.g., `/data` and `/data/coolify` → only `/data`).
+
 ## [1.20.2] - 2026-03-14
 
 ### Fixed

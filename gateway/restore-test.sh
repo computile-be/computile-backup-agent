@@ -857,34 +857,7 @@ phase2_restore_files() {
         return 0
     fi
 
-    # Restore from restic locally
-    log_info "Restoring snapshot '$SNAPSHOT_ID' to local temp directory..."
-    local restore_start
-    restore_start=$(date +%s)
-
-    local restic_output
-    local restic_rc=0
-    restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" --target "$TEMP_RESTORE_DIR" 2>&1) || restic_rc=$?
-
-    if [[ $restic_rc -eq 0 ]]; then
-        local restore_end
-        restore_end=$(date +%s)
-        local restore_duration=$((restore_end - restore_start))
-
-        # Calculate restored size
-        local restored_bytes
-        restored_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-        local restored_human
-        restored_human=$(_human_size "${restored_bytes:-0}")
-        report_ok "Restic restore: ${restored_human} extracted ($(_format_duration $restore_duration))"
-    else
-        log_error "Restic restore failed (exit code: $restic_rc)"
-        log_error "Output: ${restic_output}"
-        report_ko "Restic restore failed: ${restic_output}"
-        return 1
-    fi
-
-    # Install prerequisites on target
+    # Install prerequisites on target first
     log_info "Installing prerequisites on target..."
     if _ssh_target "DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq rsync gzip curl" &>/dev/null; then
         report_ok "Target prerequisites installed"
@@ -892,26 +865,130 @@ phase2_restore_files() {
         report_warn "Could not install prerequisites (may already be present)"
     fi
 
-    # Rsync to target
-    log_info "Transferring files to target..."
-    local rsync_start
-    rsync_start=$(date +%s)
+    # Get the list of paths in the snapshot
+    log_info "Listing paths in snapshot '$SNAPSHOT_ID'..."
+    local snapshot_paths
+    snapshot_paths=$(restic snapshots --no-lock "$SNAPSHOT_ID" --json 2>/dev/null \
+        | grep -oP '"paths":\s*\[\K[^\]]+' \
+        | tr ',' '\n' | tr -d '"' | tr -d ' ') || true
 
-    local rsync_output
-    local rsync_rc=0
-    rsync_output=$(rsync -az --info=progress2 \
-        -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}" \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
+    if [[ -z "$snapshot_paths" ]]; then
+        # Fallback: try to detect paths from restic ls (top-level dirs)
+        log_warn "Could not parse paths from snapshot metadata, using restic ls..."
+        snapshot_paths=$(restic ls --no-lock "$SNAPSHOT_ID" / 2>/dev/null \
+            | head -20 | grep -E '^/[^/]+$' | sort -u) || true
+    fi
 
-    if [[ $rsync_rc -eq 0 ]]; then
-        local rsync_end
-        rsync_end=$(date +%s)
-        local rsync_duration=$((rsync_end - rsync_start))
-        report_ok "Rsync to target ($(_format_duration $rsync_duration))"
+    if [[ -z "$snapshot_paths" ]]; then
+        log_error "Could not determine snapshot paths"
+        report_ko "Could not determine snapshot paths"
+        return 1
+    fi
+
+    # Deduplicate: if a path is a prefix of another, keep only the parent
+    # e.g., /data and /data/coolify → keep only /data
+    local dedup_paths=""
+    local path
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        local is_subpath=false
+        local existing
+        while IFS= read -r existing; do
+            [[ -z "$existing" ]] && continue
+            if [[ "$path" == "$existing"/* ]]; then
+                is_subpath=true
+                break
+            fi
+        done <<< "$dedup_paths"
+        if ! $is_subpath; then
+            # Remove any existing paths that are subpaths of this one
+            local new_dedup=""
+            while IFS= read -r existing; do
+                [[ -z "$existing" ]] && continue
+                if [[ "$existing" != "$path"/* ]]; then
+                    new_dedup+="${existing}"$'\n'
+                fi
+            done <<< "$dedup_paths"
+            dedup_paths="${new_dedup}${path}"$'\n'
+        fi
+    done <<< "$snapshot_paths"
+
+    # Convert to array
+    local -a paths=()
+    while IFS= read -r path; do
+        [[ -n "$path" ]] && paths+=("$path")
+    done <<< "$dedup_paths"
+
+    local total_paths=${#paths[@]}
+    log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
+
+    # Restore and rsync each path individually to limit RAM usage
+    local restore_start
+    restore_start=$(date +%s)
+    local total_restored_bytes=0
+    local path_idx=0
+    local failed_paths=()
+
+    for path in "${paths[@]}"; do
+        path_idx=$((path_idx + 1))
+        log_info "[$path_idx/$total_paths] Restoring $path ..."
+
+        # Clean temp dir before each path to free disk and memory
+        rm -rf "${TEMP_RESTORE_DIR:?}/"*
+
+        local restic_output
+        local restic_rc=0
+        restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
+            --target "$TEMP_RESTORE_DIR" --include "$path" 2>&1) || restic_rc=$?
+
+        if [[ $restic_rc -ne 0 ]]; then
+            log_error "  Restic restore failed for $path (exit code: $restic_rc)"
+            log_error "  Output: ${restic_output}"
+            report_ko "Restic restore $path: exit $restic_rc — ${restic_output}"
+            failed_paths+=("$path")
+            continue
+        fi
+
+        # Calculate size of this path
+        local path_bytes
+        path_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+        total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
+        local path_human
+        path_human=$(_human_size "${path_bytes:-0}")
+        log_info "  Extracted: $path_human"
+
+        # Rsync this path to target
+        log_info "  Syncing $path to target..."
+        local rsync_output
+        local rsync_rc=0
+        rsync_output=$(rsync -az \
+            -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}" \
+            "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
+
+        if [[ $rsync_rc -ne 0 ]]; then
+            log_error "  Rsync failed for $path (exit code: $rsync_rc)"
+            log_error "  Output: ${rsync_output}"
+            report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
+            failed_paths+=("$path")
+            continue
+        fi
+
+        log_info "  $path done"
+    done
+
+    # Cleanup temp dir
+    rm -rf "${TEMP_RESTORE_DIR:?}/"*
+
+    local restore_end
+    restore_end=$(date +%s)
+    local restore_duration=$((restore_end - restore_start))
+    local total_human
+    total_human=$(_human_size "$total_restored_bytes")
+
+    if [[ ${#failed_paths[@]} -eq 0 ]]; then
+        report_ok "Restore + rsync complete: ${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s))"
     else
-        log_error "Rsync failed (exit code: $rsync_rc)"
-        log_error "Output: ${rsync_output}"
-        report_ko "Rsync to target failed: ${rsync_output}"
+        report_ko "Restore completed with ${#failed_paths[@]} failure(s): ${failed_paths[*]}"
         return 1
     fi
 }
