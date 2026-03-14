@@ -1317,15 +1317,25 @@ _restore_and_sync_path() {
     fi
 
     # Verify SSH connectivity is still working after rsync
+    # After syncing /etc, the ControlMaster connection may be stale (changed passwd/pam/sshd config)
+    # so we close it and re-establish a fresh connection before declaring failure
     if ! _ssh_target true 2>/dev/null; then
-        log_error "${indent}  SSH connectivity lost after rsync of $path"
-        log_error "${indent}  Restored files may have overwritten SSH keys on target"
-        log_error "${indent}  Try re-copying gateway SSH key: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
-        report_ko "SSH connectivity lost after rsync of $path"
-        failed_paths+=("$path")
-        # Abort remaining paths — no point continuing without SSH
-        report_ko "Remaining paths skipped — SSH connection broken"
-        return 1
+        log_warn "${indent}  SSH ControlMaster stale after rsync of $path — reconnecting..."
+        # Kill stale ControlMaster and retry with a fresh connection
+        _cleanup_ssh_control
+        sleep 1
+        _setup_ssh_control
+        if ! _ssh_target true 2>/dev/null; then
+            log_error "${indent}  SSH connectivity lost after rsync of $path"
+            log_error "${indent}  Restored files may have overwritten SSH keys on target"
+            log_error "${indent}  Try re-copying gateway SSH key: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
+            report_ko "SSH connectivity lost after rsync of $path"
+            failed_paths+=("$path")
+            # Abort remaining paths — no point continuing without SSH
+            report_ko "Remaining paths skipped — SSH connection broken"
+            return 1
+        fi
+        log_info "${indent}  SSH reconnected OK"
     fi
 
     # Check target disk space after rsync
