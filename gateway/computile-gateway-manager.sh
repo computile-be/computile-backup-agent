@@ -21,6 +21,8 @@ GATEWAY_HEALTHCHECK_URL=""
 GATEWAY_WEBHOOK_URL=""
 GATEWAY_WEBHOOK_HEADERS=()
 MONITOR_RESTIC_CHECK="no"
+MONITOR_AUTO_UNLOCK="no"
+MONITOR_AUTO_UNLOCK_HOURS=4
 
 # ──────────────────────────────────────────────
 # Gateway config loading
@@ -2507,6 +2509,7 @@ monitor_and_alert() {
     done < <(list_clients)
 
     # --- Check 6: Stale restic locks ---
+    local auto_unlock_secs=$(( MONITOR_AUTO_UNLOCK_HOURS * 3600 ))
     if mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
         while IFS= read -r client; do
             [[ -z "$client" ]] && continue
@@ -2526,7 +2529,17 @@ monitor_and_alert() {
                         local lock_hours=$(( lock_age / 3600 ))
                         local vps_name
                         vps_name=$(basename "$(dirname "$lock_dir")")
-                        alerts+=("warning|${client#backup-}/${vps_name}: stale lock (${lock_hours}h old)")
+
+                        # Auto-remove if enabled and lock exceeds threshold
+                        if [[ "${MONITOR_AUTO_UNLOCK:-no}" == "yes" ]] && [[ $lock_age -gt $auto_unlock_secs ]]; then
+                            if rm -f "$lock_file" 2>/dev/null; then
+                                alerts+=("warning|${client#backup-}/${vps_name}: stale lock removed (was ${lock_hours}h old)")
+                            else
+                                alerts+=("warning|${client#backup-}/${vps_name}: stale lock (${lock_hours}h old, auto-remove failed)")
+                            fi
+                        else
+                            alerts+=("warning|${client#backup-}/${vps_name}: stale lock (${lock_hours}h old)")
+                        fi
                     fi
                 done
             done

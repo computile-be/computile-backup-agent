@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.11.1] - 2026-03-14
+
+### Added
+- **Auto-unlock stale restic locks** in `--monitor`: opt-in `MONITOR_AUTO_UNLOCK=yes` automatically removes locks older than `MONITOR_AUTO_UNLOCK_HOURS` (default 4h) — prevents stuck locks from blocking overnight backups
+
 ## [1.11.0] - 2026-03-14
 
 ### Added

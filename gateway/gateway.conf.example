@@ -25,6 +25,11 @@
 # Recommended only for weekly cron, not every 15 minutes.
 # MONITOR_RESTIC_CHECK="no"
 
+# Auto-remove stale restic locks older than N hours during --monitor.
+# Prevents stuck locks from blocking the next backup overnight.
+# MONITOR_AUTO_UNLOCK="no"
+# MONITOR_AUTO_UNLOCK_HOURS=4
+
 # ----------------------------------------------
 # Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
 # ----------------------------------------------
