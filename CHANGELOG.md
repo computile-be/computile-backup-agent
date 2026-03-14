@@ -4,6 +4,15 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.24.0] - 2026-03-14
+
+### Improved
+- **Restore test**: show elapsed time in progress lines (e.g., `progress: 1.2G extracted (17% of total, 2m 15s elapsed)`)
+- **Restore test**: Phase 2 summary with total size, duration, and average speed
+- **Restore test**: skip duplicate Tailscale check in Phase 1 when already done in interactive Phase 0
+- **Restore test**: strip inline comments from ROLE config value (no more `coolify # coolify, forge, ...`)
+- **Restore test**: timeout on `restic stats` (10s) to prevent hang on large repos — gracefully degrades to no percentage
+
 ## [1.23.1] - 2026-03-14
 
 ### Improved

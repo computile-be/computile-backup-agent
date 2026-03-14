@@ -742,7 +742,7 @@ _setup_restic_env() {
 _detect_role() {
     local config_file="${BACKUP_BASE}/backup-${CLIENT}/data/_meta/${VPS}/backup-agent.conf"
     if [[ -f "$config_file" ]]; then
-        ROLE=$(grep -E '^ROLE=' "$config_file" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
+        ROLE=$(grep -E '^ROLE=' "$config_file" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' | sed 's/[[:space:]]*#.*//' | xargs || true)
     fi
 
     # Fallback: check if /data/coolify exists in snapshot (can be slow)
@@ -763,8 +763,10 @@ phase1_preflight() {
     log_section "PHASE 1: Pre-flight Checks"
     report_phase "1" "PRE-FLIGHT"
 
-    # Check Tailscale connectivity
-    if $DRY_RUN; then
+    # Check Tailscale connectivity (skip if already checked in interactive phase 0)
+    if [[ "$INTERACTIVE" == true ]]; then
+        report_ok "Tailscale connectivity to ${TARGET} (checked in phase 0)"
+    elif $DRY_RUN; then
         report_ok "Tailscale connectivity (dry-run)"
     elif _check_tailscale_connectivity "$TARGET"; then
         report_ok "Tailscale connectivity to ${TARGET}"
@@ -876,26 +878,35 @@ _restore_and_sync_path() {
 
     # Run restic in background with a progress monitor
     local restic_log="${TEMP_RESTORE_DIR}.restic.log"
+    local restic_start_time
+    restic_start_time=$(date +%s)
     restic restore --no-lock "$SNAPSHOT_ID" \
         --target "$TEMP_RESTORE_DIR" --include "$path" \
         >"$restic_log" 2>&1 &
     local restic_pid=$!
 
-    # Progress monitor: show extracted size + percentage every 5 seconds
+    # Progress monitor: show extracted size + percentage + elapsed every 5 seconds
     local last_size=""
     while kill -0 "$restic_pid" 2>/dev/null; do
         sleep 5
         if [[ -d "$TEMP_RESTORE_DIR" ]]; then
-            local cur_bytes cur_human pct_str=""
+            local cur_bytes cur_human pct_str="" elapsed_str
             cur_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
             cur_human=$(du -sh "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+            local now_ts
+            now_ts=$(date +%s)
+            elapsed_str=$(_format_duration $((now_ts - restic_start_time)))
             if [[ -n "$cur_human" && "$cur_human" != "$last_size" ]]; then
                 if [[ $SNAPSHOT_TOTAL_BYTES -gt 0 && "${cur_bytes:-0}" =~ ^[0-9]+$ ]]; then
                     local pct=$(( (cur_bytes + total_restored_bytes) * 100 / SNAPSHOT_TOTAL_BYTES ))
                     [[ $pct -gt 100 ]] && pct=100
-                    pct_str=" (${pct}% of total)"
+                    pct_str=" (${pct}% of total,"
                 fi
-                log_info "${indent}    progress: ${cur_human} extracted${pct_str}"
+                if [[ -n "$pct_str" ]]; then
+                    log_info "${indent}    progress: ${cur_human} extracted${pct_str} ${elapsed_str} elapsed)"
+                else
+                    log_info "${indent}    progress: ${cur_human} extracted (${elapsed_str} elapsed)"
+                fi
                 last_size="$cur_human"
             fi
         fi
@@ -1066,14 +1077,16 @@ phase2_restore_files() {
     local total_paths=${#paths[@]}
     log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
 
-    # Get total snapshot size for progress percentage
+    # Get total snapshot size for progress percentage (with timeout to avoid OOM on huge repos)
     SNAPSHOT_TOTAL_BYTES=0
-    log_info "Calculating snapshot size..."
+    log_info "Calculating snapshot size (timeout: 10s)..."
     local stats_json
-    stats_json=$(restic stats --no-lock "$SNAPSHOT_ID" --json 2>/dev/null) || true
+    stats_json=$(timeout 10 restic stats --no-lock "$SNAPSHOT_ID" --json 2>/dev/null) || true
     if [[ -n "$stats_json" ]]; then
         SNAPSHOT_TOTAL_BYTES=$(echo "$stats_json" | grep -oP '"total_size":\s*\K[0-9]+' || echo "0")
         log_info "Snapshot total size: $(_human_size "$SNAPSHOT_TOTAL_BYTES")"
+    else
+        log_warn "Could not determine snapshot size (restic stats timed out or failed) — progress percentage will not be shown"
     fi
 
     # Build rsync command with sudo if needed
@@ -1108,8 +1121,16 @@ phase2_restore_files() {
     local total_human
     total_human=$(_human_size "$total_restored_bytes")
 
+    # Phase 2 summary
+    local avg_speed="N/A"
+    if [[ $restore_duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
+        local bytes_per_sec=$((total_restored_bytes / restore_duration))
+        avg_speed="$(_human_size "$bytes_per_sec")/s"
+    fi
+    log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
+
     if [[ ${#failed_paths[@]} -eq 0 ]]; then
-        report_ok "Restore + rsync complete: ${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s))"
+        report_ok "Restore + rsync complete: ${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s), avg ${avg_speed})"
     else
         report_ko "Restore completed with ${#failed_paths[@]} failure(s): ${failed_paths[*]}"
         return 1
