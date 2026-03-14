@@ -2167,7 +2167,8 @@ _restore_browse() {
     local snapshot_id="$1"
     local current_dir="/"
 
-    # Cache the full file listing with metadata (--long gives perms, size, date, time, path)
+    # Cache the full file listing with metadata
+    # restic ls --long format: perms uid gid size date time path
     local cache_file
     cache_file=$(mktemp /tmp/restic-browse-XXXXXX) || return
     trap "rm -f '$cache_file'" RETURN
@@ -2180,16 +2181,18 @@ _restore_browse() {
 
     while true; do
         # Use awk to extract direct children of current_dir with metadata
+        # restic ls --long fields: $1=perms $2=uid $3=gid $4=size $5=date $6=time $7+=path
         # Output: name\ttype\tsize\tdate
         local entries_file
         entries_file=$(mktemp /tmp/restic-entries-XXXXXX) || return
 
         awk -v dir="$current_dir" '
         {
-            perms=$1; size=$2; date=$3
-            # Path is everything from field 5 onwards (field 4 is time)
+            perms=$1; size=$4; date=$5
+            # Path is everything from field 7 onwards
             path=""
-            for(i=5;i<=NF;i++) path=(path ? path " " : "") $i
+            for(i=7;i<=NF;i++) path=(path ? path " " : "") $i
+            if (path == "") next
 
             # Determine if direct child of dir
             if (dir == "/") {
@@ -2260,10 +2263,11 @@ _restore_browse() {
             fi
 
             # Extract file metadata from cache
+            # restic ls --long fields: $1=perms $2=uid $3=gid $4=size $5=date $6=time $7+=path
             local file_meta
             file_meta=$(awk -v fp="$full_path" '{
-                path=""; for(i=5;i<=NF;i++) path=(path ? path " " : "") $i
-                if (path == fp) { printf "%s  %s %s  %s", $1, $3, $4, $2; exit }
+                path=""; for(i=7;i<=NF;i++) path=(path ? path " " : "") $i
+                if (path == fp) { printf "%s  %s %s  %s", $1, $5, $6, $4; exit }
             }' "$cache_file")
 
             local file_info="Path: ${full_path}"
