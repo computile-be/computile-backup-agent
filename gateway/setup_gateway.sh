@@ -294,6 +294,16 @@ install_gateway_scripts() {
     # Record source repo path for future updates
     echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
 
+    # Generate SSH key for restore operations (if not already present)
+    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+        info "Generating SSH key for restore operations..."
+        ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "computile-gateway-restore" >/dev/null 2>&1
+        info "SSH key generated: /root/.ssh/id_ed25519.pub"
+        info "This key is used by computile-restore-test to connect to target VMs."
+    else
+        info "SSH key already exists: /root/.ssh/id_ed25519"
+    fi
+
     # Gateway config (don't overwrite existing)
     local gw_config="/etc/computile-backup/gateway.conf"
     mkdir -p /etc/computile-backup

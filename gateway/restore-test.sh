@@ -402,9 +402,14 @@ _tui_ssh_key_check() {
     done
 
     if [[ -z "$pub_key" ]]; then
-        _msg_box "Restore Test — SSH Key" \
-            "No SSH public key found on this gateway.\n\nGenerate one with:\n  ssh-keygen -t ed25519\n\nThen re-run the restore test."
-        return 1
+        if _yesno "Restore Test — SSH Key" \
+            "No SSH public key found on this gateway.\n\nGenerate one now? (ed25519, no passphrase)"; then
+            ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "computile-gateway-restore" >/dev/null 2>&1
+            pub_key=$(cat /root/.ssh/id_ed25519.pub)
+            key_file="/root/.ssh/id_ed25519.pub"
+        else
+            return 1
+        fi
     fi
 
     local msg="Before connecting, you must add this gateway's SSH public key\n"
