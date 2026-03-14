@@ -1017,6 +1017,12 @@ phase2_restore_files() {
     local rsync_rsh="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}"
     local -a rsync_opts=(-az -e "$rsync_rsh")
     [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
+    # Exclude SSH config to avoid breaking the active connection
+    rsync_opts+=(
+        --exclude='/etc/ssh/'
+        --exclude='/home/*/.ssh/authorized_keys'
+        --exclude='/root/.ssh/authorized_keys'
+    )
 
     # Restore and rsync each path individually to limit RAM usage
     local restore_start

@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.2] - 2026-03-14
+
+### Fixed
+- **Restore test**: exclude `/etc/ssh/`, `/home/*/.ssh/authorized_keys`, and `/root/.ssh/authorized_keys` from rsync to prevent breaking the active SSH connection during restore
+
 ## [1.22.1] - 2026-03-14
 
 ### Fixed
