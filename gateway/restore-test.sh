@@ -268,8 +268,12 @@ _rsync_ssh_cmd() {
     echo "$cmd"
 }
 
-# Deploy an idempotent fixup script on the target that re-injects the SSH user
-# and restores host keys after rsync/tar overwrites /etc.
+# Deploy a path-aware fixup script on the target that re-injects the SSH user
+# and restores host keys after rsync/tar overwrites system files.
+# The fixup reads /tmp/computile-restore-current-path to determine what was just
+# restored, and only modifies system identity files (passwd/shadow/group/PAM)
+# when /etc was actually restored — avoiding dangerous sed -i on passwd after
+# /home restore which can momentarily remove the SSH user and kill ControlMaster.
 # Called inline via --rsync-path wrapper (rsync) or chained after tar (streaming),
 # so it runs within the SAME SSH session — no polling, no timing issues.
 _deploy_ssh_fixup() {
@@ -291,36 +295,10 @@ USERNAME=$(echo "$USER_LINE" | cut -d: -f1)
 USER_UID=$(echo "$USER_LINE" | cut -d: -f3)
 USER_GID=$(echo "$USER_LINE" | cut -d: -f4)
 USER_HOME=$(cat "$SAVE_DIR/home_dir" 2>/dev/null)
+RESTORED_PATH=$(cat /tmp/computile-restore-current-path 2>/dev/null || echo "")
 
-# Always replace user entry — handles case where backup has same username
-# but different credentials (sed -i removes backup version, then re-append saved)
-sed -i "/^${USERNAME}:/d" /etc/passwd 2>/dev/null || true
-cat "$SAVE_DIR/passwd_line" >> /etc/passwd
-
-if [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ]; then
-    sed -i "/^${USERNAME}:/d" /etc/shadow 2>/dev/null || true
-    cat "$SAVE_DIR/shadow_line" >> /etc/shadow
-fi
-
-if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
-    sed -i "/^${USERNAME}:/d" /etc/group 2>/dev/null || true
-    cat "$SAVE_DIR/group_line" >> /etc/group
-fi
-
-# Supplementary groups
-if [ -f "$SAVE_DIR/groups" ]; then
-    for g in $(cat "$SAVE_DIR/groups"); do
-        grep -q "^${g}:" /etc/group 2>/dev/null && usermod -aG "$g" "$USERNAME" 2>/dev/null || true
-    done
-fi
-
-# Sudoers
-if [ -f "$SAVE_DIR/sudoers_file" ]; then
-    cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
-    chmod 440 "/etc/sudoers.d/${USERNAME}"
-fi
-
-# Home dir + authorized_keys
+# ── Layer 1: ALWAYS restore authorized_keys (both locations) ──
+# Home-based authorized_keys
 mkdir -p "${USER_HOME}/.ssh"
 chmod 755 "${USER_HOME}"
 chmod 700 "${USER_HOME}/.ssh"
@@ -331,45 +309,112 @@ if [ -f "$SAVE_DIR/authorized_keys" ]; then
     chown "${USER_UID}:${USER_GID}" "${USER_HOME}/.ssh/authorized_keys"
 fi
 
-# Restore PAM + nsswitch (critical for SSH session creation)
-if [ -d "$SAVE_DIR/pam" ]; then
-    cp "$SAVE_DIR/pam/nsswitch.conf" /etc/nsswitch.conf 2>/dev/null || true
-    cp "$SAVE_DIR/pam/shells" /etc/shells 2>/dev/null || true
-    cp "$SAVE_DIR/pam/login.defs" /etc/login.defs 2>/dev/null || true
-    if [ -d "$SAVE_DIR/pam/pam.d" ]; then
-        cp -a "$SAVE_DIR/pam/pam.d"/* /etc/pam.d/ 2>/dev/null || true
-    fi
+# System-wide authorized_keys (resilient to /home restore)
+if [ -f "$SAVE_DIR/authorized_keys" ]; then
+    mkdir -p /etc/ssh/authorized_keys
+    chmod 755 /etc/ssh/authorized_keys
+    cp "$SAVE_DIR/authorized_keys" "/etc/ssh/authorized_keys/${USERNAME}"
+    chmod 644 "/etc/ssh/authorized_keys/${USERNAME}"
 fi
 
-# Restore SSH host keys + sshd config, but only reload sshd if keys actually changed.
-# Unnecessary reloads kill the SSH ControlMaster on some systems (Debian 13+).
-if [ -d "$SAVE_DIR/ssh" ]; then
-    keys_changed=false
-    for saved_key in "$SAVE_DIR"/ssh/ssh_host_*; do
-        [ -f "$saved_key" ] || continue
-        current_key="/etc/ssh/$(basename "$saved_key")"
-        if ! cmp -s "$saved_key" "$current_key" 2>/dev/null; then
-            keys_changed=true
-            break
-        fi
-    done
-    if ! cmp -s "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
-        keys_changed=true
+# Restore sshd config snippet (AuthorizedKeysFile directive)
+if [ -f "$SAVE_DIR/sshd_snippet" ]; then
+    mkdir -p /etc/ssh/sshd_config.d
+    cp "$SAVE_DIR/sshd_snippet" /etc/ssh/sshd_config.d/99-computile-restore.conf
+    chmod 644 /etc/ssh/sshd_config.d/99-computile-restore.conf
+fi
+
+# ── Layer 2: system identity fixup (only after /etc restore) ──
+# Modifying passwd/shadow/group is only necessary when /etc was overwritten.
+# Doing it after /home restore is both unnecessary and dangerous: the sed -i
+# momentarily removes the user which can kill active SSH sessions on Debian 13+.
+is_etc_restore=false
+case "$RESTORED_PATH" in
+    /etc|/etc/*) is_etc_restore=true ;;
+    /)           is_etc_restore=true ;;  # full dump = everything including /etc
+    "")          is_etc_restore=true ;;  # unknown path = full fixup (safety)
+esac
+
+if $is_etc_restore; then
+    sed -i "/^${USERNAME}:/d" /etc/passwd 2>/dev/null || true
+    cat "$SAVE_DIR/passwd_line" >> /etc/passwd
+
+    if [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ]; then
+        sed -i "/^${USERNAME}:/d" /etc/shadow 2>/dev/null || true
+        cat "$SAVE_DIR/shadow_line" >> /etc/shadow
     fi
 
-    cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
-    cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
+    if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
+        sed -i "/^${USERNAME}:/d" /etc/group 2>/dev/null || true
+        cat "$SAVE_DIR/group_line" >> /etc/group
+    fi
 
-    if $keys_changed; then
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
-            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+    if [ -f "$SAVE_DIR/groups" ]; then
+        for g in $(cat "$SAVE_DIR/groups"); do
+            grep -q "^${g}:" /etc/group 2>/dev/null && usermod -aG "$g" "$USERNAME" 2>/dev/null || true
+        done
+    fi
+
+    if [ -f "$SAVE_DIR/sudoers_file" ]; then
+        cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
+        chmod 440 "/etc/sudoers.d/${USERNAME}"
+    fi
+
+    # Restore PAM + nsswitch (critical for SSH session creation)
+    if [ -d "$SAVE_DIR/pam" ]; then
+        cp "$SAVE_DIR/pam/nsswitch.conf" /etc/nsswitch.conf 2>/dev/null || true
+        cp "$SAVE_DIR/pam/shells" /etc/shells 2>/dev/null || true
+        cp "$SAVE_DIR/pam/login.defs" /etc/login.defs 2>/dev/null || true
+        if [ -d "$SAVE_DIR/pam/pam.d" ]; then
+            cp -a "$SAVE_DIR/pam/pam.d"/* /etc/pam.d/ 2>/dev/null || true
+        fi
+    fi
+
+    # Restore SSH host keys + sshd config, but only reload sshd if keys actually changed.
+    # Unnecessary reloads kill the SSH ControlMaster on some systems (Debian 13+).
+    if [ -d "$SAVE_DIR/ssh" ]; then
+        keys_changed=false
+        for saved_key in "$SAVE_DIR"/ssh/ssh_host_*; do
+            [ -f "$saved_key" ] || continue
+            current_key="/etc/ssh/$(basename "$saved_key")"
+            if ! cmp -s "$saved_key" "$current_key" 2>/dev/null; then
+                keys_changed=true
+                break
+            fi
+        done
+        if ! cmp -s "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
+            keys_changed=true
+        fi
+
+        cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
+        cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
+
+        if $keys_changed; then
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
+                systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+        fi
+    fi
+else
+    # Non-/etc restore: only verify user still exists (append-only, never delete)
+    if ! grep -q "^${USERNAME}:" /etc/passwd 2>/dev/null; then
+        cat "$SAVE_DIR/passwd_line" >> /etc/passwd
+    fi
+    if [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ]; then
+        if ! grep -q "^${USERNAME}:" /etc/shadow 2>/dev/null; then
+            cat "$SAVE_DIR/shadow_line" >> /etc/shadow
+        fi
+    fi
+    if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
+        if ! grep -q "^${USERNAME}:" /etc/group 2>/dev/null; then
+            cat "$SAVE_DIR/group_line" >> /etc/group
+        fi
     fi
 fi
 FIXUP_SCRIPT
 
 chmod +x /tmp/computile-ssh-fixup.sh
 
-# Also create the rsync wrapper that runs fixup after each rsync
+# Rsync wrapper: runs fixup after each rsync within the same SSH session
 cat > /tmp/computile-rsync-wrapper.sh <<'WRAPPER_SCRIPT'
 #!/bin/bash
 rsync "$@"
@@ -388,8 +433,77 @@ FIXUP_DEPLOY_EOF
 # Remove the SSH fixup script, rsync wrapper, and saved identity (called during cleanup)
 _cleanup_ssh_fixup() {
     _ssh_target "sudo bash -c '
-        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-rsync-wrapper.sh /tmp/computile-ssh-save /tmp/computile-restore-staging
+        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-rsync-wrapper.sh /tmp/computile-ssh-save /tmp/computile-restore-staging /tmp/computile-restore-current-path
+        rm -f /etc/ssh/sshd_config.d/99-computile-restore.conf
+        rm -f /etc/ssh/authorized_keys/${SSH_USER:-computile-restore}
+        rmdir /etc/ssh/authorized_keys 2>/dev/null
+        if sshd -t 2>/dev/null; then
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+        fi
     '" 2>/dev/null || true
+}
+
+# Set up resilient SSH access: store authorized_keys in a system-wide location
+# (/etc/ssh/authorized_keys/%u) that survives /home restore. Also add an sshd
+# config snippet so sshd looks in both the standard and system-wide locations.
+# Since rsync without --delete never removes files absent from the source,
+# both the snippet and the system-wide keys persist through ALL restore phases.
+_setup_resilient_ssh() {
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
+
+    if _ssh_target "${_sudo}bash -s" <<RESILIENT_EOF 2>/dev/null; then
+set -e
+
+# System-wide authorized_keys directory
+mkdir -p /etc/ssh/authorized_keys
+chmod 755 /etc/ssh/authorized_keys
+
+# Copy current authorized_keys to system-wide location
+home=\$(eval echo "~${SSH_USER}")
+if [ -f "\${home}/.ssh/authorized_keys" ]; then
+    cp "\${home}/.ssh/authorized_keys" "/etc/ssh/authorized_keys/${SSH_USER}"
+    chmod 644 "/etc/ssh/authorized_keys/${SSH_USER}"
+fi
+
+# sshd config snippet: look in both system-wide and home-based locations
+SNIPPET="/etc/ssh/sshd_config.d/99-computile-restore.conf"
+mkdir -p /etc/ssh/sshd_config.d
+cat > "\$SNIPPET" <<'SSHD_CONF'
+# Computile restore-test: resilient authorized_keys location
+# Ensures SSH access survives /home and /etc restores
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys
+SSHD_CONF
+chmod 644 "\$SNIPPET"
+
+# Validate config before reloading — never break a working sshd
+if sshd -t 2>/dev/null; then
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+else
+    rm -f "\$SNIPPET"
+fi
+RESILIENT_EOF
+        log_info "  Resilient SSH: authorized_keys stored in /etc/ssh/authorized_keys/${SSH_USER}"
+        # Verify SSH still works after sshd reload
+        if ! _ssh_target true 2>/dev/null; then
+            log_warn "  SSH disrupted by sshd reload — reverting resilient config..."
+            _ssh_target "${_sudo}rm -f /etc/ssh/sshd_config.d/99-computile-restore.conf; ${_sudo}systemctl reload sshd 2>/dev/null || ${_sudo}systemctl reload ssh 2>/dev/null || true" 2>/dev/null || true
+            sleep 2
+            return 1
+        fi
+    else
+        log_warn "  Could not set up resilient SSH — continuing with standard authorized_keys"
+        return 1
+    fi
+}
+
+# Set the current restore path on the target so the fixup script knows
+# which system files need repair. Called before each rsync/streaming operation.
+_set_restore_path() {
+    local path="$1"
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
+    _ssh_target "${_sudo}bash -c 'echo \"$path\" > /tmp/computile-restore-current-path'" 2>/dev/null || true
 }
 
 
@@ -402,6 +516,9 @@ _stream_path_to_target() {
     local label="$2"
 
     log_info "${label} Streaming $path to target (no local writes)..."
+
+    # Tell the target which path is being restored (path-aware fixup)
+    _set_restore_path "$path"
 
     # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
     # All /etc files are fully restored; the inline fixup re-injects SSH identity after tar
@@ -499,10 +616,11 @@ _stream_path_to_target() {
         ssh-keygen -R "$TARGET" 2>/dev/null || true
         ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
         local ssh_ok=false
-        for attempt in 1 2 3 4 5; do
-            sleep 2
+        local wait_secs=3
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            sleep "$wait_secs"
             if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=5 -o BatchMode=yes \
+                -o ConnectTimeout=8 -o BatchMode=yes \
                 -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
                 _setup_ssh_control
                 if _ssh_target true 2>/dev/null; then
@@ -511,6 +629,7 @@ _stream_path_to_target() {
                 fi
                 _cleanup_ssh_control
             fi
+            [[ $wait_secs -lt 10 ]] && wait_secs=$((wait_secs + 1))
         done
         if ! $ssh_ok; then
             log_error "  SSH connectivity lost after streaming $path"
@@ -518,7 +637,7 @@ _stream_path_to_target() {
             failed_paths+=("$path")
             return 1
         fi
-        log_info "  SSH recovered after streaming $path"
+        log_info "  SSH recovered after streaming $path (attempt $attempt)"
     fi
 
     # Check target disk space
@@ -540,6 +659,9 @@ _stream_path_to_target() {
 # Uses: restic dump --archive tar / | ssh tar xf -
 _stream_full_to_target() {
     log_info "Streaming full snapshot to target (single dump, no local writes)..."
+
+    # Full dump = all paths at once; set path to "/" so fixup does full repair
+    _set_restore_path "/"
 
     # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
     local tar_excludes=""
@@ -631,10 +753,11 @@ _stream_full_to_target() {
         ssh-keygen -R "$TARGET" 2>/dev/null || true
         ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
         local ssh_ok=false
-        for attempt in 1 2 3 4 5; do
-            sleep 2
+        local wait_secs=3
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            sleep "$wait_secs"
             if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=5 -o BatchMode=yes \
+                -o ConnectTimeout=8 -o BatchMode=yes \
                 -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
                 _setup_ssh_control
                 if _ssh_target true 2>/dev/null; then
@@ -643,13 +766,14 @@ _stream_full_to_target() {
                 fi
                 _cleanup_ssh_control
             fi
+            [[ $wait_secs -lt 10 ]] && wait_secs=$((wait_secs + 1))
         done
         if ! $ssh_ok; then
             log_error "SSH connectivity lost after full snapshot streaming"
             report_ko "SSH connectivity lost after full snapshot streaming"
             return 1
         fi
-        log_info "SSH recovered after full snapshot streaming"
+        log_info "SSH recovered after full snapshot streaming (attempt $attempt)"
     fi
 
     # Check target disk space
@@ -1595,8 +1719,29 @@ cp /etc/nsswitch.conf "\$SAVE_DIR/pam/" 2>/dev/null || true
 cp /etc/shells "\$SAVE_DIR/pam/" 2>/dev/null || true
 cp /etc/login.defs "\$SAVE_DIR/pam/" 2>/dev/null || true
 cp -a /etc/pam.d "\$SAVE_DIR/pam/" 2>/dev/null || true
+
+# Save sshd config snippet for AuthorizedKeysFile (created by _setup_resilient_ssh)
+if [ -f /etc/ssh/sshd_config.d/99-computile-restore.conf ]; then
+    cp /etc/ssh/sshd_config.d/99-computile-restore.conf "\$SAVE_DIR/sshd_snippet"
+fi
+
+# Save system-wide authorized_keys if it exists
+if [ -f "/etc/ssh/authorized_keys/${SSH_USER}" ]; then
+    cp "/etc/ssh/authorized_keys/${SSH_USER}" "\$SAVE_DIR/syswide_authorized_keys"
+fi
 SAVE_EOF
         log_info "  Saved: user entry, groups, authorized_keys, host keys"
+
+        # Set up resilient SSH: store keys in /etc/ssh/authorized_keys/ (outside /home)
+        _setup_resilient_ssh
+
+        # Now save the newly created sshd snippet into the save dir
+        _ssh_target "${_sudo_save}bash -c '
+            SAVE_DIR=/tmp/computile-ssh-save
+            [ -f /etc/ssh/sshd_config.d/99-computile-restore.conf ] && cp /etc/ssh/sshd_config.d/99-computile-restore.conf \$SAVE_DIR/sshd_snippet 2>/dev/null || true
+            [ -f /etc/ssh/authorized_keys/${SSH_USER} ] && cp /etc/ssh/authorized_keys/${SSH_USER} \$SAVE_DIR/syswide_authorized_keys 2>/dev/null || true
+        '" 2>/dev/null || true
+
         log_info "  Deploying SSH fixup script on target..."
         _deploy_ssh_fixup
         fixup_ok=true
@@ -1727,6 +1872,11 @@ SAVE_EOF
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
+
+        # Tell the target which path is being restored so the fixup script
+        # can decide which system files to repair (path-aware fixup).
+        _set_restore_path "$path"
+
         _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0
 
         # After each rsync, check if SSH is still alive and re-establish if needed.
@@ -1738,10 +1888,11 @@ SAVE_EOF
             ssh-keygen -R "$TARGET" 2>/dev/null || true
             ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
             local ssh_ok=false
-            for attempt in 1 2 3 4 5; do
-                sleep 2
+            local wait_secs=3
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                sleep "$wait_secs"
                 if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                    -o ConnectTimeout=5 -o BatchMode=yes \
+                    -o ConnectTimeout=8 -o BatchMode=yes \
                     -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
                     _setup_ssh_control
                     if _ssh_target true 2>/dev/null; then
@@ -1758,11 +1909,13 @@ SAVE_EOF
                             --exclude='data/coolify/ssh/keys/'
                             --exclude='data/coolify/ssh/id.*'
                         )
-                        log_info "SSH re-established after $path"
+                        log_info "SSH re-established after $path (attempt $attempt)"
                         break
                     fi
                     _cleanup_ssh_control
                 fi
+                # Progressive backoff: 3, 4, 5, 6... up to 10s
+                [[ $wait_secs -lt 10 ]] && wait_secs=$((wait_secs + 1))
             done
             if ! $ssh_ok; then
                 log_error "Could not re-establish SSH after $path — aborting remaining paths"
