@@ -367,6 +367,10 @@ if $is_etc_restore; then
     else
         echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${USERNAME}"
     fi
+    # Debian 13+ uses Defaults use_pty; non-interactive SSH has no TTY → sudo fails.
+    # Override for restore user so Phase 3+ work when gateway runs ssh 'sudo cmd'.
+    grep -q "Defaults:${USERNAME} !use_pty" "/etc/sudoers.d/${USERNAME}" 2>/dev/null || \
+        echo "Defaults:${USERNAME} !use_pty" >> "/etc/sudoers.d/${USERNAME}"
     chmod 440 "/etc/sudoers.d/${USERNAME}"
     # Debug trace — remove once verified
     echo "[fixup] sudoers: is_etc=$is_etc_restore user=$USERNAME file=$(ls -la /etc/sudoers.d/${USERNAME} 2>&1)" >> /tmp/computile-fixup-debug.log
