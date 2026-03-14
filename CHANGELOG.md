@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.20.1] - 2026-03-14
+
+### Improved
+- **Restore test**: indicate that the target VM must be tagged `tag:computile` in Tailscale — shown in the target input dialog and in the Tailscale connectivity error message with the exact command to run
+
 ## [1.20.0] - 2026-03-14
 
 ### Added

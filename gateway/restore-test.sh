@@ -372,8 +372,8 @@ _tui_select_snapshot() {
 _tui_input_target() {
     local target
     target=$($DIALOG --title "Restore Test — Target VM" \
-        --inputbox "Enter the target VM hostname or Tailscale IP:" \
-        10 $WT_WIDTH "" \
+        --inputbox "Enter the target VM hostname or Tailscale IP.\n\nIMPORTANT: the target must be tagged 'tag:computile' in Tailscale.\nRun on the target: sudo tailscale set --advertise-tags=tag:computile" \
+        14 $WT_WIDTH "" \
         3>&1 1>&2 2>&3) || return 1
 
     echo "$target"
@@ -403,11 +403,14 @@ _check_tailscale_connectivity() {
             msg+="This could be:\n"
             msg+="  - The target is offline\n"
             msg+="  - Tailscale ACLs block access from this gateway\n"
-            msg+="  - The hostname/IP is incorrect\n\n"
+            msg+="  - The hostname/IP is incorrect\n"
+            msg+="  - The target is not tagged 'tag:computile'\n\n"
             if [[ -n "$ping_output" ]]; then
                 msg+="Details:\n${ping_output}\n\n"
             fi
-            msg+="Check your Tailscale admin console for ACL rules."
+            msg+="Ensure the target is tagged correctly:\n"
+            msg+="  sudo tailscale set --advertise-tags=tag:computile\n\n"
+            msg+="Then check your Tailscale admin console for ACL rules."
             _msg_box "Restore Test — Tailscale Error" "$msg"
         fi
         return 1
