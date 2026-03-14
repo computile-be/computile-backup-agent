@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.23.1] - 2026-03-14
+
+### Improved
+- **Restore test**: show percentage of total snapshot during restore progress (e.g., `progress: 1.2G extracted (17% of total)`) — uses `restic stats` to get total snapshot size before starting
+
 ## [1.23.0] - 2026-03-14
 
 ### Improved

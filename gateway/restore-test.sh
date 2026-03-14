@@ -881,16 +881,22 @@ _restore_and_sync_path() {
         >"$restic_log" 2>&1 &
     local restic_pid=$!
 
-    # Progress monitor: show extracted size every 5 seconds
+    # Progress monitor: show extracted size + percentage every 5 seconds
     local last_size=""
     while kill -0 "$restic_pid" 2>/dev/null; do
         sleep 5
         if [[ -d "$TEMP_RESTORE_DIR" ]]; then
-            local cur_size
-            cur_size=$(du -sh "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-            if [[ -n "$cur_size" && "$cur_size" != "$last_size" ]]; then
-                log_info "${indent}    progress: ${cur_size} extracted..."
-                last_size="$cur_size"
+            local cur_bytes cur_human pct_str=""
+            cur_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+            cur_human=$(du -sh "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
+            if [[ -n "$cur_human" && "$cur_human" != "$last_size" ]]; then
+                if [[ $SNAPSHOT_TOTAL_BYTES -gt 0 && "${cur_bytes:-0}" =~ ^[0-9]+$ ]]; then
+                    local pct=$(( (cur_bytes + total_restored_bytes) * 100 / SNAPSHOT_TOTAL_BYTES ))
+                    [[ $pct -gt 100 ]] && pct=100
+                    pct_str=" (${pct}% of total)"
+                fi
+                log_info "${indent}    progress: ${cur_human} extracted${pct_str}"
+                last_size="$cur_human"
             fi
         fi
     done
@@ -1059,6 +1065,16 @@ phase2_restore_files() {
 
     local total_paths=${#paths[@]}
     log_info "Snapshot contains $total_paths top-level path(s): ${paths[*]}"
+
+    # Get total snapshot size for progress percentage
+    SNAPSHOT_TOTAL_BYTES=0
+    log_info "Calculating snapshot size..."
+    local stats_json
+    stats_json=$(restic stats --no-lock "$SNAPSHOT_ID" --json 2>/dev/null) || true
+    if [[ -n "$stats_json" ]]; then
+        SNAPSHOT_TOTAL_BYTES=$(echo "$stats_json" | grep -oP '"total_size":\s*\K[0-9]+' || echo "0")
+        log_info "Snapshot total size: $(_human_size "$SNAPSHOT_TOTAL_BYTES")"
+    fi
 
     # Build rsync command with sudo if needed
     local rsync_rsh="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}"
