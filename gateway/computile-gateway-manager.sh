@@ -10,7 +10,7 @@
 # ================================================================
 set -euo pipefail
 
-readonly BACKUP_BASE="/srv/backups"
+BACKUP_BASE="/srv/backups"
 readonly GATEWAY_CONFIG="/etc/computile-backup/gateway.conf"
 
 # Defaults (can be overridden by gateway.conf)
@@ -20,6 +20,19 @@ DISK_CRITICAL_PERCENT=95
 GATEWAY_HEALTHCHECK_URL=""
 GATEWAY_WEBHOOK_URL=""
 GATEWAY_WEBHOOK_HEADERS=()
+
+# ──────────────────────────────────────────────
+# Gateway config loading
+# ──────────────────────────────────────────────
+_load_gateway_config() {
+    if [[ -f "$GATEWAY_CONFIG" ]]; then
+        # shellcheck source=/dev/null
+        source "$GATEWAY_CONFIG" 2>/dev/null || true
+    fi
+}
+
+_load_gateway_config
+readonly BACKUP_BASE 2>/dev/null || true
 
 # ──────────────────────────────────────────────
 # Check dependencies
@@ -2012,6 +2025,197 @@ show_auth_logs() {
 }
 
 # ──────────────────────────────────────────────
+# Restore helper
+# ──────────────────────────────────────────────
+
+_restore_select_client() {
+    local clients=()
+    while IFS= read -r client; do
+        [[ -z "$client" ]] && continue
+        local display="${client#backup-}"
+        clients+=("$display" "$display")
+    done < <(list_clients)
+
+    if [[ ${#clients[@]} -eq 0 ]]; then
+        msg_box "Restore" "No backup clients found."
+        return 1
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Restore — Select Client" \
+        --menu "Choose a client:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${clients[@]}" \
+        3>&1 1>&2 2>&3) || return 1
+
+    echo "$choice"
+}
+
+_restore_select_vps() {
+    local client="$1"
+    local data_dir="${BACKUP_BASE}/backup-${client}/data"
+    if [[ ! -d "$data_dir" ]]; then
+        msg_box "Restore" "No data directory found for client '${client}'."
+        return 1
+    fi
+
+    local entries=()
+    for dir in "$data_dir"/*/; do
+        [[ -d "$dir" ]] || continue
+        local name
+        name=$(basename "$dir")
+        [[ "$name" == "_meta" ]] && continue
+        entries+=("$name" "$name")
+    done
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        msg_box "Restore" "No VPS repositories found for client '${client}'."
+        return 1
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Restore — Select VPS" \
+        --menu "Choose a VPS repository:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${entries[@]}" \
+        3>&1 1>&2 2>&3) || return 1
+
+    echo "$choice"
+}
+
+_restore_get_restic_env() {
+    local client="$1"
+    local vps="$2"
+
+    export RESTIC_REPOSITORY="${BACKUP_BASE}/backup-${client}/data/${vps}"
+    local pw_file="${BACKUP_BASE}/backup-${client}/data/_meta/${vps}/restic-password"
+
+    if [[ ! -f "$pw_file" ]]; then
+        msg_box "Restore — Error" "Password file not found:\n${pw_file}"
+        return 1
+    fi
+
+    export RESTIC_PASSWORD_FILE="$pw_file"
+}
+
+_restore_select_snapshot() {
+    local snap_items=()
+
+    if command -v jq &>/dev/null; then
+        local json
+        json=$(restic snapshots --json --no-lock 2>/dev/null) || {
+            msg_box "Restore — Error" "Failed to list snapshots from repository."
+            return 1
+        }
+
+        local count
+        count=$(echo "$json" | jq 'length')
+        if [[ "$count" -eq 0 || "$count" == "null" ]]; then
+            msg_box "Restore" "No snapshots found in this repository."
+            return 1
+        fi
+
+        while IFS=$'\t' read -r sid stime shost; do
+            snap_items+=("$sid" "${stime}  ${shost}")
+        done < <(echo "$json" | jq -r '.[] | [.short_id, (.time | split(".")[0] | gsub("T";" ")), .hostname] | @tsv')
+    else
+        local text_output
+        text_output=$(restic snapshots --no-lock --compact 2>/dev/null) || {
+            msg_box "Restore — Error" "Failed to list snapshots from repository."
+            return 1
+        }
+
+        # Parse tabular output: lines that start with a hex id (8 chars)
+        while IFS= read -r line; do
+            local sid
+            sid=$(echo "$line" | awk '{print $1}')
+            # short_id is 8 hex chars
+            if [[ "$sid" =~ ^[0-9a-f]{8}$ ]]; then
+                local rest
+                rest=$(echo "$line" | sed "s/^${sid}[[:space:]]*//" | sed 's/[[:space:]]*$//')
+                snap_items+=("$sid" "$rest")
+            fi
+        done <<< "$text_output"
+
+        if [[ ${#snap_items[@]} -eq 0 ]]; then
+            msg_box "Restore" "No snapshots found in this repository."
+            return 1
+        fi
+    fi
+
+    local choice
+    choice=$($DIALOG --title "Restore — Select Snapshot" \
+        --menu "Choose a snapshot:" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "${snap_items[@]}" \
+        3>&1 1>&2 2>&3) || return 1
+
+    echo "$choice"
+}
+
+_restore_action_menu() {
+    local snapshot_id="$1"
+
+    local action
+    action=$($DIALOG --title "Restore — Action" \
+        --menu "Snapshot: ${snapshot_id}" $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "browse"  "Browse files" \
+        "restore" "Restore to directory" \
+        3>&1 1>&2 2>&3) || return
+
+    case "$action" in
+        browse)
+            local listing
+            listing=$(restic ls --no-lock "$snapshot_id" 2>/dev/null | head -500) || true
+            if [[ -z "$listing" ]]; then
+                msg_box "Browse" "No files found or unable to list snapshot."
+            else
+                msg_scroll "Files in ${snapshot_id}" "$listing"
+            fi
+            ;;
+        restore)
+            local path target timestamp
+            path=$($DIALOG --title "Restore — Path" \
+                --inputbox "Path to include (e.g. /etc, /home):" 10 $WT_WIDTH \
+                "/" \
+                3>&1 1>&2 2>&3) || return
+
+            timestamp=$(date +%Y%m%d-%H%M%S)
+            target=$($DIALOG --title "Restore — Target Directory" \
+                --inputbox "Directory to restore into:" 10 $WT_WIDTH \
+                "/tmp/computile-restore-${timestamp}" \
+                3>&1 1>&2 2>&3) || return
+
+            yesno "Confirm Restore" \
+                "Restore snapshot ${snapshot_id}\nInclude: ${path}\nTarget: ${target}\n\nProceed?" || return
+
+            local result
+            result=$(restic restore --no-lock "$snapshot_id" \
+                --target "$target" --include "$path" 2>&1) || true
+
+            msg_scroll "Restore Result" "$result"
+            ;;
+    esac
+}
+
+restore_menu() {
+    if ! command -v restic &>/dev/null; then
+        msg_box "Restore — Error" "restic is not installed.\nInstall it with: apt-get install restic"
+        return
+    fi
+
+    local client
+    client=$(_restore_select_client) || return
+
+    local vps
+    vps=$(_restore_select_vps "$client") || return
+
+    _restore_get_restic_env "$client" "$vps" || return
+
+    local snapshot_id
+    snapshot_id=$(_restore_select_snapshot) || return
+
+    _restore_action_menu "$snapshot_id"
+}
+
+# ──────────────────────────────────────────────
 # Main menu
 # ──────────────────────────────────────────────
 main_menu() {
@@ -2038,6 +2242,7 @@ main_menu() {
             "alerts"     "Stale backup alerts" \
             "sftp-test"  "Test SFTP setup for a client" \
             "storage"    "Storage breakdown (sizes cached 1h)" \
+            "restore"    "Restore files from backup" \
             "clearcache" "Refresh size cache" \
             "health"     "System health (SMB, SSH, fail2ban)" \
             "tailscale"  "Tailscale peers (online/offline)" \
@@ -2056,6 +2261,7 @@ main_menu() {
             alerts)     show_stale_alerts ;;
             sftp-test)  test_sftp_client ;;
             storage)    show_storage ;;
+            restore)    restore_menu ;;
             clearcache) _clear_size_cache ;;
             health)     show_system_health ;;
             tailscale)  show_tailscale_peers ;;
@@ -2069,22 +2275,11 @@ main_menu() {
 }
 
 # ──────────────────────────────────────────────
-# Gateway config loading
-# ──────────────────────────────────────────────
-_load_gateway_config() {
-    if [[ -f "$GATEWAY_CONFIG" ]]; then
-        # shellcheck source=/dev/null
-        source "$GATEWAY_CONFIG" 2>/dev/null || true
-    fi
-}
-
-# ──────────────────────────────────────────────
 # Monitor & alert (--monitor)
 # ──────────────────────────────────────────────
 # Runs all health checks, collects alerts, and sends notifications
 # via healthcheck URL and/or webhook. Designed for cron.
 monitor_and_alert() {
-    _load_gateway_config
 
     local -a alerts=()  # "severity|message" pairs
     local now
@@ -2195,6 +2390,30 @@ monitor_and_alert() {
         status="warning"
     fi
 
+    # --- Anti-flapping: fingerprint-based deduplication ---
+    local state_dir="/var/lib/computile-gateway"
+    local state_file="${state_dir}/monitor-state"
+    local fingerprint
+    if [[ ${#alerts[@]} -gt 0 ]]; then
+        fingerprint=$(printf '%s\n' "${alerts[@]}" | sort | md5sum | awk '{print $1}')
+    else
+        fingerprint="ok"
+    fi
+
+    local prev_fingerprint=""
+    if [[ -f "$state_file" ]]; then
+        prev_fingerprint=$(head -1 "$state_file" 2>/dev/null) || true
+    fi
+
+    local alerts_changed=true
+    if [[ "$fingerprint" == "$prev_fingerprint" ]]; then
+        alerts_changed=false
+    fi
+
+    # Persist new fingerprint (best-effort)
+    mkdir -p "$state_dir" 2>/dev/null || true
+    echo "$fingerprint" > "$state_file" 2>/dev/null || true
+
     # --- Build summary ---
     local summary=""
     local hostname
@@ -2228,12 +2447,12 @@ monitor_and_alert() {
             echo "[WARN] Healthcheck ping failed" >&2
     fi
 
-    # --- Send webhook ---
-    if [[ -n "$GATEWAY_WEBHOOK_URL" ]] && [[ "$status" != "ok" ]]; then
+    # --- Send webhook (only when alert set changes) ---
+    if [[ -n "$GATEWAY_WEBHOOK_URL" ]] && [[ "$alerts_changed" == "true" ]]; then
         # Build JSON payload
         local alerts_json="["
         local first=true
-        for alert in "${alerts[@]}"; do
+        for alert in "${alerts[@]+"${alerts[@]}"}"; do
             local severity="${alert%%|*}"
             local message="${alert#*|}"
             # Escape quotes in message
@@ -2262,6 +2481,8 @@ PEOF
             -X POST --data-raw "$payload" \
             "$GATEWAY_WEBHOOK_URL" >/dev/null 2>&1 || \
             echo "[WARN] Webhook notification failed" >&2
+    elif [[ -n "$GATEWAY_WEBHOOK_URL" ]] && [[ "$alerts_changed" == "false" ]]; then
+        echo "[INFO] Alert set unchanged — notifications suppressed"
     fi
 
     # Exit code: 0 = ok, 1 = warnings, 2 = critical

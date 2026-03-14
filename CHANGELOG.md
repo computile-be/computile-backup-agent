@@ -4,6 +4,16 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.10.0] - 2026-03-14
+
+### Added
+- **VPS health check** (`computile-backup --check`): new client-side command that checks timer status, last backup exit code/age, disk space, and SFTP repository connectivity — text output by default, `--json` for monitoring integration. Exit codes: 0=ok, 1=degraded, 2=critical
+- **Restore TUI helper** in gateway manager: browse clients → VPS → snapshots, then list files, restore full snapshot or individual paths — uses `_meta` restic passwords and `--no-lock` for safe read-only access from gateway
+- **`BACKUP_BASE` configurable** via `gateway.conf`: no longer hardcoded to `/srv/backups`, supports any mount point
+
+### Changed
+- **Anti-flapping for `--monitor`**: alerts are fingerprinted (MD5 of sorted alert set) and deduplicated — repeated identical alerts are suppressed, notifications only fire when the alert set changes or returns to OK
+
 ## [1.9.0] - 2026-03-14
 
 ### Added

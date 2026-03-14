@@ -6,6 +6,12 @@
 # ================================================================
 
 # ----------------------------------------------
+# Storage path
+# ----------------------------------------------
+# Base directory where client backups are stored.
+# BACKUP_BASE="/srv/backups"
+
+# ----------------------------------------------
 # Monitoring thresholds
 # ----------------------------------------------
 # Days without backup before a client is considered stale

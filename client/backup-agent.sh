@@ -50,6 +50,8 @@ FORCE_DRY_RUN=false
 FORCE_VERBOSE=false
 
 DO_STATUS=false
+DO_CHECK=false
+CHECK_JSON=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,6 +75,14 @@ while [[ $# -gt 0 ]]; do
             DO_STATUS=true
             shift
             ;;
+        --check)
+            DO_CHECK=true
+            shift
+            ;;
+        --json)
+            CHECK_JSON=true
+            shift
+            ;;
         --version)
             echo "computile-backup-agent ${AGENT_VERSION}"
             exit 0
@@ -90,6 +100,8 @@ Options:
   --dry-run           Simulate backup without making changes
   --verbose, -v       Enable verbose output
   --status            Output JSON status (for monitoring/fleet tracking)
+  --check             Run health check (text output by default)
+  --json              Use JSON output (with --check)
   --version           Show version
   --help, -h          Show this help
 
@@ -99,6 +111,8 @@ Examples:
   computile-backup --init                   # Initialize repo and run backup
   computile-backup --dry-run --verbose      # Test run with debug output
   computile-backup --status                 # JSON status for monitoring
+  computile-backup --check                  # Health check (text)
+  computile-backup --check --json           # Health check (JSON)
 HELP
             exit 0
             ;;
@@ -187,9 +201,152 @@ JEOF
 }
 
 # ──────────────────────────────────────────────
+# Health check mode
+# ──────────────────────────────────────────────
+run_health_check() {
+    local issues=()
+    local critical=false
+
+    # --- Timer active ---
+    local timer_active="false"
+    if systemctl is-active computile-backup.timer &>/dev/null; then
+        timer_active="true"
+    else
+        issues+=("timer is not active")
+        critical=true
+    fi
+
+    # --- Last backup exit code ---
+    local last_exit=""
+    last_exit=$(systemctl show computile-backup.service --property=ExecMainStatus 2>/dev/null | cut -d= -f2) || true
+    if [[ -n "$last_exit" ]] && [[ "$last_exit" != "0" ]]; then
+        issues+=("last backup exited with code ${last_exit}")
+    fi
+
+    # --- Last backup age ---
+    local last_timestamp=""
+    local last_age_hours=""
+    last_timestamp=$(systemctl show computile-backup.service --property=ExecMainStartTimestamp 2>/dev/null | cut -d= -f2-) || true
+    last_timestamp=$(echo "$last_timestamp" | sed 's/^ *//')
+    if [[ -n "$last_timestamp" ]] && [[ "$last_timestamp" != "" ]]; then
+        local last_epoch
+        last_epoch=$(date -d "$last_timestamp" '+%s' 2>/dev/null) || true
+        if [[ -n "$last_epoch" ]]; then
+            local now_epoch
+            now_epoch=$(date '+%s')
+            last_age_hours=$(( (now_epoch - last_epoch) / 3600 ))
+            if [[ $last_age_hours -gt 48 ]]; then
+                issues+=("last backup is ${last_age_hours}h old (>48h)")
+            fi
+        fi
+    fi
+
+    # --- Disk space ---
+    local backup_root="${BACKUP_ROOT:-/var/backups/computile}"
+    local disk_avail_mb=""
+    if [[ -d "$backup_root" ]]; then
+        disk_avail_mb=$(df -k "$backup_root" 2>/dev/null | awk 'NR==2 {print int($4/1024)}') || true
+        if [[ -n "$disk_avail_mb" ]] && [[ "$disk_avail_mb" -lt 500 ]] 2>/dev/null; then
+            issues+=("low disk space: ${disk_avail_mb} MB free (<500 MB)")
+        fi
+    fi
+
+    # --- SFTP connectivity ---
+    local sftp_reachable="false"
+    if [[ -n "${RESTIC_REPOSITORY:-}" ]] && [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
+        _setup_restic_env 2>/dev/null || true
+        if restic snapshots --json --last --quiet 2>/dev/null >/dev/null; then
+            sftp_reachable="true"
+        else
+            issues+=("SFTP repository unreachable")
+            critical=true
+        fi
+    else
+        issues+=("restic config not loaded, skipped SFTP check")
+    fi
+
+    # --- Determine status ---
+    local status="ok"
+    local exit_code=0
+    if $critical; then
+        status="critical"
+        exit_code=2
+    elif [[ ${#issues[@]} -gt 0 ]]; then
+        status="degraded"
+        exit_code=1
+    fi
+
+    # --- Output ---
+    if $CHECK_JSON; then
+        # Build JSON issues array
+        local issues_json="[]"
+        if [[ ${#issues[@]} -gt 0 ]]; then
+            issues_json="["
+            local first=true
+            for issue in "${issues[@]}"; do
+                if $first; then
+                    first=false
+                else
+                    issues_json+=","
+                fi
+                # Escape double quotes in issue text
+                local escaped="${issue//\"/\\\"}"
+                issues_json+="\"${escaped}\""
+            done
+            issues_json+="]"
+        fi
+
+        cat <<JEOF
+{
+  "status": "${status}",
+  "agent_version": "${AGENT_VERSION}",
+  "timer_active": ${timer_active},
+  "last_backup_exit_code": ${last_exit:-null},
+  "last_backup_age_hours": ${last_age_hours:-null},
+  "disk_available_mb": ${disk_avail_mb:-null},
+  "sftp_reachable": ${sftp_reachable},
+  "issues": ${issues_json},
+  "timestamp": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+JEOF
+    else
+        echo "computile-backup health check (v${AGENT_VERSION})"
+        echo "----------------------------------------"
+        printf "  Timer active:    %s\n" "$timer_active"
+        printf "  Last exit code:  %s\n" "${last_exit:-N/A}"
+        printf "  Last backup age: %s\n" "${last_age_hours:+${last_age_hours}h}"
+        printf "  Disk free:       %s\n" "${disk_avail_mb:+${disk_avail_mb} MB}"
+        printf "  SFTP reachable:  %s\n" "$sftp_reachable"
+        printf "  Agent version:   %s\n" "$AGENT_VERSION"
+        echo "----------------------------------------"
+        if [[ ${#issues[@]} -eq 0 ]]; then
+            echo "All checks passed."
+        else
+            echo "Issues (${status}):"
+            for issue in "${issues[@]}"; do
+                echo "  - ${issue}"
+            done
+        fi
+    fi
+
+    return "$exit_code"
+}
+
+# ──────────────────────────────────────────────
 # Main backup procedure
 # ──────────────────────────────────────────────
 main() {
+    # Handle --check before full initialization
+    if $DO_CHECK; then
+        # Load config silently for SFTP check
+        if [[ -f "$CONFIG_FILE" ]]; then
+            # shellcheck source=/dev/null
+            source "$CONFIG_FILE" 2>/dev/null || true
+        fi
+        run_health_check
+        exit $?
+    fi
+
     # Handle --status before full initialization
     if $DO_STATUS; then
         show_status_json
