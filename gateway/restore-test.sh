@@ -1966,10 +1966,12 @@ _wait_for_container() {
     local container="$1"
     local timeout="${2:-120}"
     local waited=0
+    local _sudo_w=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_w="sudo "
 
     while [[ $waited -lt $timeout ]]; do
         local status
-        status=$(_ssh_target "docker ps --filter name='^${container}$' --format '{{.Status}}'" 2>/dev/null || true)
+        status=$(_ssh_target "${_sudo_w}docker ps --filter name='^${container}$' --format '{{.Status}}'" 2>/dev/null || true)
         if [[ "$status" == *"Up"* ]]; then
             return 0
         fi
@@ -2014,6 +2016,8 @@ _parse_dump_filename() {
 
 _restore_mysql_dumps() {
     local mysql_dir="$1"  # remote path on target
+    local _sudo_m=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_m="sudo "
 
     # List dumps on target
     local dump_list
@@ -2045,11 +2049,11 @@ _restore_mysql_dumps() {
         # Find matching MySQL container on target
         local target_container=""
         if [[ "$container" != "host" ]]; then
-            target_container=$(_ssh_target "docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
+            target_container=$(_ssh_target "${_sudo_m}docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
         fi
 
         if [[ -z "$target_container" ]]; then
-            target_container=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'mysql|mariadb' | head -1 | cut -f1" || true)
+            target_container=$(_ssh_target "${_sudo_m}docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'mysql|mariadb' | head -1 | cut -f1" || true)
         fi
 
         if [[ -z "$target_container" ]]; then
@@ -2064,13 +2068,13 @@ _restore_mysql_dumps() {
 
         # Extract MySQL password from container env
         local mysql_pass
-        mysql_pass=$(_ssh_target "docker exec ${target_container} env 2>/dev/null | grep -E '^(MYSQL_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD)=' | head -1 | cut -d= -f2" || true)
+        mysql_pass=$(_ssh_target "${_sudo_m}docker exec ${target_container} env 2>/dev/null | grep -E '^(MYSQL_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD)=' | head -1 | cut -d= -f2" || true)
 
         local pass_arg=""
         [[ -n "$mysql_pass" ]] && pass_arg="-p${mysql_pass}"
 
         # Import directly from target filesystem (no SCP needed)
-        if _ssh_target "gunzip -c '${dump_path}' | docker exec -i '${target_container}' mysql -u root ${pass_arg} '${db}'" 2>&1; then
+        if _ssh_target "gunzip -c '${dump_path}' | ${_sudo_m}docker exec -i '${target_container}' mysql -u root ${pass_arg} '${db}'" 2>&1; then
             report_ok "${container}/${db} (mysql, ${size_human})"
         else
             report_ko "${container}/${db} (mysql, ${size_human}): import failed"
@@ -2080,6 +2084,8 @@ _restore_mysql_dumps() {
 
 _restore_postgres_dumps() {
     local pg_dir="$1"  # remote path on target
+    local _sudo_p=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_p="sudo "
 
     local dump_list
     dump_list=$(_ssh_target "find '$pg_dir' -name '*.sql.gz' 2>/dev/null") || true
@@ -2110,11 +2116,11 @@ _restore_postgres_dumps() {
         # Find matching PostgreSQL container on target
         local target_container=""
         if [[ "$container" != "host" ]]; then
-            target_container=$(_ssh_target "docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
+            target_container=$(_ssh_target "${_sudo_p}docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
         fi
 
         if [[ -z "$target_container" ]]; then
-            target_container=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'postgres' | head -1 | cut -f1" || true)
+            target_container=$(_ssh_target "${_sudo_p}docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'postgres' | head -1 | cut -f1" || true)
         fi
 
         if [[ -z "$target_container" ]]; then
@@ -2129,11 +2135,11 @@ _restore_postgres_dumps() {
 
         # Determine postgres user
         local pg_user
-        pg_user=$(_ssh_target "docker exec ${target_container} env 2>/dev/null | grep '^POSTGRES_USER=' | cut -d= -f2" || true)
+        pg_user=$(_ssh_target "${_sudo_p}docker exec ${target_container} env 2>/dev/null | grep '^POSTGRES_USER=' | cut -d= -f2" || true)
         pg_user="${pg_user:-postgres}"
 
         # Import directly from target filesystem
-        if _ssh_target "gunzip -c '${dump_path}' | docker exec -i '${target_container}' psql -U '${pg_user}' -d '${db}'" 2>&1; then
+        if _ssh_target "gunzip -c '${dump_path}' | ${_sudo_p}docker exec -i '${target_container}' psql -U '${pg_user}' -d '${db}'" 2>&1; then
             report_ok "${container}/${db} (postgres, ${size_human})"
         else
             report_ko "${container}/${db} (postgres, ${size_human}): import failed"
@@ -2143,6 +2149,8 @@ _restore_postgres_dumps() {
 
 _restore_redis_dumps() {
     local redis_dir="$1"  # remote path on target
+    local _sudo_r=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_r="sudo "
 
     local dump_list
     dump_list=$(_ssh_target "find '$redis_dir' -name '*.rdb' 2>/dev/null") || true
@@ -2172,10 +2180,10 @@ _restore_redis_dumps() {
         log_info "Restoring Redis: ${container} (${size_human})..."
 
         local target_container=""
-        target_container=$(_ssh_target "docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
+        target_container=$(_ssh_target "${_sudo_r}docker ps --format '{{.Names}}' 2>/dev/null | grep -i '${container}' | head -1" || true)
 
         if [[ -z "$target_container" ]]; then
-            target_container=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'redis' | head -1 | cut -f1" || true)
+            target_container=$(_ssh_target "${_sudo_r}docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'redis' | head -1 | cut -f1" || true)
         fi
 
         if [[ -z "$target_container" ]]; then
@@ -2190,10 +2198,10 @@ _restore_redis_dumps() {
 
         # Import directly from target filesystem
         if _ssh_target "
-            docker exec '${target_container}' redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
+            ${_sudo_r}docker exec '${target_container}' redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
             sleep 2
-            docker cp '${dump_path}' '${target_container}:/data/dump.rdb'
-            docker start '${target_container}' 2>/dev/null || true
+            ${_sudo_r}docker cp '${dump_path}' '${target_container}:/data/dump.rdb'
+            ${_sudo_r}docker start '${target_container}' 2>/dev/null || true
         " 2>&1; then
             report_ok "${container} (redis, ${size_human})"
         else
@@ -2268,9 +2276,10 @@ _verify_coolify() {
 }
 
 _verify_db_connections() {
-    # Find running database containers and test connections
+    local _sudo_d=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_d="sudo "
     local db_containers
-    db_containers=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null" || true)
+    db_containers=$(_ssh_target "${_sudo_d}docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null" || true)
 
     if [[ -z "$db_containers" ]]; then
         return 0
@@ -2280,10 +2289,10 @@ _verify_db_connections() {
     while IFS=$'\t' read -r name image; do
         if [[ "$image" == *postgres* ]]; then
             local pg_user
-            pg_user=$(_ssh_target "docker exec ${name} env 2>/dev/null | grep '^POSTGRES_USER=' | cut -d= -f2" || echo "postgres")
+            pg_user=$(_ssh_target "${_sudo_d}docker exec ${name} env 2>/dev/null | grep '^POSTGRES_USER=' | cut -d= -f2" || echo "postgres")
             pg_user="${pg_user:-postgres}"
 
-            if _ssh_target "docker exec ${name} psql -U '${pg_user}' -c '\\l'" &>/dev/null; then
+            if _ssh_target "${_sudo_d}docker exec ${name} psql -U '${pg_user}' -c '\\l'" &>/dev/null; then
                 report_ok "PostgreSQL connection (${name})"
             else
                 report_ko "PostgreSQL connection (${name})"
@@ -2295,12 +2304,12 @@ _verify_db_connections() {
     while IFS=$'\t' read -r name image; do
         if [[ "$image" == *mysql* || "$image" == *mariadb* ]]; then
             local mysql_pass
-            mysql_pass=$(_ssh_target "docker exec ${name} env 2>/dev/null | grep -E '^(MYSQL_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD)=' | head -1 | cut -d= -f2" || true)
+            mysql_pass=$(_ssh_target "${_sudo_d}docker exec ${name} env 2>/dev/null | grep -E '^(MYSQL_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD)=' | head -1 | cut -d= -f2" || true)
 
             local pass_arg=""
             [[ -n "$mysql_pass" ]] && pass_arg="-p${mysql_pass}"
 
-            if _ssh_target "docker exec ${name} mysql -u root ${pass_arg} -e 'SELECT 1'" &>/dev/null; then
+            if _ssh_target "${_sudo_d}docker exec ${name} mysql -u root ${pass_arg} -e 'SELECT 1'" &>/dev/null; then
                 report_ok "MySQL connection (${name})"
             else
                 report_ko "MySQL connection (${name})"
@@ -2310,15 +2319,17 @@ _verify_db_connections() {
 }
 
 _verify_applications() {
+    local _sudo_a=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_a="sudo "
     log_info "Discovering deployed applications..."
 
     # Try to find Coolify-managed containers
     local app_containers
-    app_containers=$(_ssh_target "docker ps --filter 'label=coolify.managed=true' --format '{{.Names}}\t{{.Ports}}'" 2>/dev/null || true)
+    app_containers=$(_ssh_target "${_sudo_a}docker ps --filter 'label=coolify.managed=true' --format '{{.Names}}\t{{.Ports}}'" 2>/dev/null || true)
 
     if [[ -z "$app_containers" ]]; then
         # Fallback: look for non-system containers
-        app_containers=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | grep -vE '^(coolify|coolify-db|coolify-redis|coolify-realtime|coolify-proxy)\b'" || true)
+        app_containers=$(_ssh_target "${_sudo_a}docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | grep -vE '^(coolify|coolify-db|coolify-redis|coolify-realtime|coolify-proxy)\b'" || true)
     fi
 
     if [[ -z "$app_containers" ]]; then
@@ -2328,6 +2339,8 @@ _verify_applications() {
 
     while IFS=$'\t' read -r name ports; do
         [[ -z "$name" ]] && continue
+        # Skip docker error messages (e.g. permission denied) when captured as stdout
+        [[ "$name" == *"permission denied"* ]] && continue
 
         # Extract HTTP port from ports string (e.g., "0.0.0.0:3000->3000/tcp")
         local http_port=""
@@ -2349,7 +2362,7 @@ _verify_applications() {
         else
             # No exposed port — just check container is running
             local status
-            status=$(_ssh_target "docker ps --filter name='^${name}$' --format '{{.Status}}'" 2>/dev/null || true)
+            status=$(_ssh_target "${_sudo_a}docker ps --filter name='^${name}$' --format '{{.Status}}'" 2>/dev/null || true)
             if [[ "$status" == *"Up"* ]]; then
                 report_ok "App '${name}': container UP (no HTTP port exposed)"
             else
