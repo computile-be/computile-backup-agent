@@ -1696,10 +1696,30 @@ self_update() {
     remote_head=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null) || true
 
     if [[ "$local_head" == "$remote_head" ]]; then
-        local new_version
-        new_version=$(head -1 VERSION 2>/dev/null || echo "unknown")
+        # Repo is up to date, but check if installed scripts match repo version
+        local repo_version
+        repo_version=$(head -1 VERSION 2>/dev/null || echo "unknown")
+        if [[ "$installed_version" != "$repo_version" ]]; then
+            echo
+            echo "Repo is current but installed scripts are outdated (v${installed_version} vs v${repo_version})."
+            echo "Reinstalling..."
+            echo
+            if bash gateway/setup_gateway.sh --update --force; then
+                echo
+                echo "================================================"
+                echo "  Update complete: v${installed_version} -> v${repo_version}"
+                echo "  The manager will restart with the new version."
+                echo "================================================"
+            else
+                echo
+                echo "[WARN] Update script returned an error. Check output above."
+            fi
+            echo "Press Enter to continue."
+            read -r
+            return
+        fi
         echo
-        echo "Already up to date (v${new_version})."
+        echo "Already up to date (v${repo_version})."
         echo "Press Enter to continue."
         read -r
         return

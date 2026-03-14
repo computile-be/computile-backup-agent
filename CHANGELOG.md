@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.5] - 2026-03-14
+
+### Fixed
+- **Gateway manager**: fix update not reinstalling scripts when git repo is already pulled but installed version is outdated — now detects version mismatch and forces reinstall
+
 ## [1.22.4] - 2026-03-14
 
 ### Fixed
