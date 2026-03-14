@@ -4,6 +4,17 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.0] - 2026-03-14
+
+### Added
+- **Gateway SSH key management**: auto-generate ed25519 key during `setup_gateway.sh` install/update for restore test operations
+- **Restore test**: interactive SSH user selection (supports non-root users) and SSH key verification step before connecting to target VM
+- **Gateway manager**: display gateway SSH key (file, fingerprint, public key) in System Health screen
+
+### Fixed
+- **Restore test**: set executable permission on `restore-test.sh`
+- **setup_gateway.sh**: ensure SSH key is generated even when version is already up to date
+
 ## [1.13.0] - 2026-03-14
 
 ### Added
