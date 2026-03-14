@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.15.0] - 2026-03-14
+
+### Added
+- **Restore test**: auto-copy SSH key to target VM via password — offers to enter the target's SSH password and uses `sshpass` + `ssh-copy-id` to push the key automatically; skips entirely if key is already authorized
+
 ## [1.14.0] - 2026-03-14
 
 ### Added
