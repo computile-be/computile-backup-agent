@@ -4,6 +4,14 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.30.0] - 2026-03-14
+
+### Changed
+- **Restore test**: replace polling SSH watchdog with inline post-rsync/tar fixup — runs within the same SSH session via `--rsync-path` wrapper (rsync) or chained after `tar xf -` (streaming), eliminating timing/polling issues entirely
+- **Restore test**: fixup uses `sed -i` to always replace the SSH user entry, fixing the bug where a same-named user in the backup would prevent re-injection
+- **Restore test**: remove tar exclusions for `/etc/ssh` and `authorized_keys` — all files are now fully restored, fixup re-injects correct SSH identity afterwards
+- **Restore test**: save SSH identity + deploy fixup before both streaming and extract+rsync modes (previously only extract+rsync)
+
 ## [1.29.1] - 2026-03-14
 
 ### Fixed

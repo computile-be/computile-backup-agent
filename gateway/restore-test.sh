@@ -269,92 +269,89 @@ _rsync_ssh_cmd() {
     echo "$cmd"
 }
 
-# Deploy a watchdog script on the target that monitors /etc/passwd and re-injects
-# the SSH user if it gets overwritten by rsync. Reads saved data from /tmp/computile-ssh-save/.
-# Runs in background, polls every 2s, auto-exits after 30 minutes.
-_deploy_ssh_watchdog() {
+# Deploy an idempotent fixup script on the target that re-injects the SSH user
+# and restores host keys after rsync/tar overwrites /etc.
+# Called inline via --rsync-path wrapper (rsync) or chained after tar (streaming),
+# so it runs within the SAME SSH session — no polling, no timing issues.
+_deploy_ssh_fixup() {
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
-    # Deploy the watchdog script and start it in background
-    _ssh_target "${_sudo}bash -s" <<'DEPLOY_EOF' 2>/dev/null || {
+    _ssh_target "${_sudo}bash -s" <<'FIXUP_DEPLOY_EOF' 2>/dev/null || {
 SAVE_DIR="/tmp/computile-ssh-save"
 
-cat > /tmp/computile-ssh-watchdog.sh <<'WATCHDOG_SCRIPT'
+cat > /tmp/computile-ssh-fixup.sh <<'FIXUP_SCRIPT'
 #!/bin/bash
 SAVE_DIR="/tmp/computile-ssh-save"
-[ ! -d "$SAVE_DIR" ] && exit 1
+[ ! -d "$SAVE_DIR" ] && exit 0
 
 USER_LINE=$(cat "$SAVE_DIR/passwd_line" 2>/dev/null)
-[ -z "$USER_LINE" ] && exit 1
+[ -z "$USER_LINE" ] && exit 0
 
 USERNAME=$(echo "$USER_LINE" | cut -d: -f1)
 USER_UID=$(echo "$USER_LINE" | cut -d: -f3)
 USER_GID=$(echo "$USER_LINE" | cut -d: -f4)
 USER_HOME=$(cat "$SAVE_DIR/home_dir" 2>/dev/null)
 
-DEADLINE=$((SECONDS + 1800))
-while [ $SECONDS -lt $DEADLINE ]; do
-    if ! grep -q "^${USERNAME}:" /etc/passwd 2>/dev/null; then
-        # User missing — re-inject from saved files
-        cat "$SAVE_DIR/passwd_line" >> /etc/passwd
-        [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ] && cat "$SAVE_DIR/shadow_line" >> /etc/shadow
-        if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
-            grep -q "^${USERNAME}:" /etc/group 2>/dev/null || cat "$SAVE_DIR/group_line" >> /etc/group
-        fi
+# Always replace user entry — handles case where backup has same username
+# but different credentials (sed -i removes backup version, then re-append saved)
+sed -i "/^${USERNAME}:/d" /etc/passwd 2>/dev/null || true
+cat "$SAVE_DIR/passwd_line" >> /etc/passwd
 
-        # Supplementary groups
-        if [ -f "$SAVE_DIR/groups" ]; then
-            for g in $(cat "$SAVE_DIR/groups"); do
-                grep -q "^${g}:" /etc/group 2>/dev/null && usermod -aG "$g" "$USERNAME" 2>/dev/null || true
-            done
-        fi
+if [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ]; then
+    sed -i "/^${USERNAME}:/d" /etc/shadow 2>/dev/null || true
+    cat "$SAVE_DIR/shadow_line" >> /etc/shadow
+fi
 
-        # Sudoers
-        if [ -f "$SAVE_DIR/sudoers_file" ]; then
-            cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
-            chmod 440 "/etc/sudoers.d/${USERNAME}"
-        fi
+if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
+    sed -i "/^${USERNAME}:/d" /etc/group 2>/dev/null || true
+    cat "$SAVE_DIR/group_line" >> /etc/group
+fi
 
-        # Home + authorized_keys
-        mkdir -p "${USER_HOME}/.ssh"
-        chmod 700 "${USER_HOME}/.ssh"
-        chown ${USER_UID}:${USER_GID} "${USER_HOME}" "${USER_HOME}/.ssh"
-        if [ -f "$SAVE_DIR/authorized_keys" ]; then
-            cp "$SAVE_DIR/authorized_keys" "${USER_HOME}/.ssh/authorized_keys"
-            chmod 600 "${USER_HOME}/.ssh/authorized_keys"
-            chown ${USER_UID}:${USER_GID} "${USER_HOME}/.ssh/authorized_keys"
-        fi
+# Supplementary groups
+if [ -f "$SAVE_DIR/groups" ]; then
+    for g in $(cat "$SAVE_DIR/groups"); do
+        grep -q "^${g}:" /etc/group 2>/dev/null && usermod -aG "$g" "$USERNAME" 2>/dev/null || true
+    done
+fi
 
-        # Restore SSH host keys + sshd config (so gateway can reconnect with same host key)
-        cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
-        cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
+# Sudoers
+if [ -f "$SAVE_DIR/sudoers_file" ]; then
+    cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
+    chmod 440 "/etc/sudoers.d/${USERNAME}"
+fi
 
-        # Restart sshd to pick up restored host keys
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
-    fi
-    sleep 2
-done
-rm -f /tmp/computile-ssh-watchdog.sh /tmp/computile-ssh-watchdog.pid
-WATCHDOG_SCRIPT
+# Home dir + authorized_keys
+mkdir -p "${USER_HOME}/.ssh"
+chmod 700 "${USER_HOME}/.ssh"
+chown "${USER_UID}:${USER_GID}" "${USER_HOME}" "${USER_HOME}/.ssh"
+if [ -f "$SAVE_DIR/authorized_keys" ]; then
+    cp "$SAVE_DIR/authorized_keys" "${USER_HOME}/.ssh/authorized_keys"
+    chmod 600 "${USER_HOME}/.ssh/authorized_keys"
+    chown "${USER_UID}:${USER_GID}" "${USER_HOME}/.ssh/authorized_keys"
+fi
 
-chmod +x /tmp/computile-ssh-watchdog.sh
-nohup /tmp/computile-ssh-watchdog.sh > /tmp/computile-ssh-watchdog.log 2>&1 &
-echo $! > /tmp/computile-ssh-watchdog.pid
-DEPLOY_EOF
-        log_warn "  Could not deploy SSH watchdog"
+# Always restore SSH host keys + sshd config (so gateway can reconnect)
+if [ -d "$SAVE_DIR/ssh" ]; then
+    cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
+    cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
+    # Restart sshd to pick up restored host keys
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+fi
+FIXUP_SCRIPT
+
+chmod +x /tmp/computile-ssh-fixup.sh
+FIXUP_DEPLOY_EOF
+        log_warn "  Could not deploy SSH fixup script"
         return 1
     }
-    log_info "  SSH watchdog deployed (polls every 2s, auto-exits after 30min)"
+    log_info "  SSH fixup script deployed on target"
 }
 
-# Stop the SSH watchdog on the target (called during cleanup)
-_stop_ssh_watchdog() {
+# Remove the SSH fixup script and saved identity (called during cleanup)
+_cleanup_ssh_fixup() {
     _ssh_target "sudo bash -c '
-        if [ -f /tmp/computile-ssh-watchdog.pid ]; then
-            kill \$(cat /tmp/computile-ssh-watchdog.pid) 2>/dev/null || true
-            rm -rf /tmp/computile-ssh-watchdog.sh /tmp/computile-ssh-watchdog.pid /tmp/computile-ssh-watchdog.log /tmp/computile-ssh-save
-        fi
+        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-ssh-save
     '" 2>/dev/null || true
 }
 
@@ -367,19 +364,18 @@ _stream_path_to_target() {
 
     log_info "${label} Streaming $path to target (no local writes)..."
 
-    # Build tar exclusions (matching rsync exclusions, relative paths for tar)
-    # GNU tar --exclude matches on stored path and excludes directory contents
+    # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
+    # All /etc files are fully restored; the inline fixup re-injects SSH identity after tar
     local tar_excludes=""
-    tar_excludes+=" --exclude='etc/ssh'"
-    tar_excludes+=" --exclude='home/*/.ssh/authorized_keys'"
-    tar_excludes+=" --exclude='root/.ssh/authorized_keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
 
-    # Build remote tar command (with sudo if non-root)
+    # Build remote command: tar extract + inline SSH fixup
+    # The fixup runs within the SAME SSH session, after tar completes,
+    # so it executes before the connection closes — no timing issues
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-    local remote_cmd="${_sudo}tar xf - -C / ${tar_excludes}"
+    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
 
     # Get target disk usage before streaming (for transferred bytes estimate)
     local before_used_kb
@@ -456,12 +452,34 @@ _stream_path_to_target() {
     fi
     log_info "  $path done: ~$(_human_size $path_bytes) in $(_format_duration $duration) ($speed)"
 
-    # Verify SSH connectivity still works
+    # Verify SSH connectivity — the inline fixup may have restarted sshd,
+    # so the ControlMaster may be stale. Re-establish if needed.
     if ! _ssh_target true 2>/dev/null; then
-        log_error "  SSH connectivity lost after streaming $path"
-        report_ko "SSH connectivity lost after streaming $path"
-        failed_paths+=("$path")
-        return 1
+        log_info "  Re-establishing SSH after streaming $path (fixup restarted sshd)..."
+        _cleanup_ssh_control
+        ssh-keygen -R "$TARGET" 2>/dev/null || true
+        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
+        local ssh_ok=false
+        for attempt in 1 2 3 4 5; do
+            sleep 2
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=5 -o BatchMode=yes \
+                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                _setup_ssh_control
+                if _ssh_target true 2>/dev/null; then
+                    ssh_ok=true
+                    break
+                fi
+                _cleanup_ssh_control
+            fi
+        done
+        if ! $ssh_ok; then
+            log_error "  SSH connectivity lost after streaming $path"
+            report_ko "SSH connectivity lost after streaming $path"
+            failed_paths+=("$path")
+            return 1
+        fi
+        log_info "  SSH recovered after streaming $path"
     fi
 
     # Check target disk space
@@ -484,18 +502,15 @@ _stream_path_to_target() {
 _stream_full_to_target() {
     log_info "Streaming full snapshot to target (single dump, no local writes)..."
 
-    # Build tar exclusions (same as per-path streaming)
+    # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
     local tar_excludes=""
-    tar_excludes+=" --exclude='etc/ssh'"
-    tar_excludes+=" --exclude='home/*/.ssh/authorized_keys'"
-    tar_excludes+=" --exclude='root/.ssh/authorized_keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
 
-    # Build remote tar command (with sudo if non-root)
+    # Build remote command: tar extract + inline SSH fixup
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-    local remote_cmd="${_sudo}tar xf - -C / ${tar_excludes}"
+    local remote_cmd="${_sudo}bash -c 'tar xf - -C / ${tar_excludes}; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC'"
 
     # Get target disk usage before streaming (for transferred bytes estimate)
     local before_used_kb
@@ -570,11 +585,32 @@ _stream_full_to_target() {
     fi
     log_info "Full snapshot done: ~$(_human_size $total_restored_bytes) in $(_format_duration $duration) ($speed)"
 
-    # Verify SSH connectivity still works
+    # Verify SSH connectivity — the inline fixup may have restarted sshd
     if ! _ssh_target true 2>/dev/null; then
-        log_error "SSH connectivity lost after full snapshot streaming"
-        report_ko "SSH connectivity lost after full snapshot streaming"
-        return 1
+        log_info "Re-establishing SSH after full snapshot streaming (fixup restarted sshd)..."
+        _cleanup_ssh_control
+        ssh-keygen -R "$TARGET" 2>/dev/null || true
+        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
+        local ssh_ok=false
+        for attempt in 1 2 3 4 5; do
+            sleep 2
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=5 -o BatchMode=yes \
+                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                _setup_ssh_control
+                if _ssh_target true 2>/dev/null; then
+                    ssh_ok=true
+                    break
+                fi
+                _cleanup_ssh_control
+            fi
+        done
+        if ! $ssh_ok; then
+            log_error "SSH connectivity lost after full snapshot streaming"
+            report_ko "SSH connectivity lost after full snapshot streaming"
+            return 1
+        fi
+        log_info "SSH recovered after full snapshot streaming"
     fi
 
     # Check target disk space
@@ -1405,24 +1441,24 @@ _restore_and_sync_path() {
         return
     fi
 
-    # Verify SSH connectivity is still working after rsync
-    # If /etc was restored, passwd/shadow may have changed — the watchdog will re-inject
+    # Verify SSH connectivity is still working after rsync.
+    # The inline fixup (via --rsync-path wrapper) should have already re-injected the
+    # SSH user + host keys within the same session. But the ControlMaster may be stale
+    # after host key changes, so we need to re-establish it.
     if ! _ssh_target true 2>/dev/null; then
-        log_warn "${indent}  SSH lost after rsync of $path — waiting for watchdog to re-inject user..."
+        log_info "${indent}  Re-establishing SSH after rsync of $path (fixup ran inline)..."
         _cleanup_ssh_control
-        # Clear known_hosts entry — host key may have changed during rsync
+        # Clear known_hosts — host keys were restored by the fixup but may have
+        # transiently changed during rsync, leaving a stale entry
         ssh-keygen -R "$TARGET" 2>/dev/null || true
         ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
-        # Wait for the watchdog (polls every 2s) to re-inject the user + restart sshd
-        # Use UserKnownHostsFile=/dev/null to avoid host key caching issues during retries:
-        # the host key may flip between backup and original as the watchdog restores it
+        # Brief wait for sshd restart (triggered by the fixup) to complete
         local ssh_ok=false
-        for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            sleep 3
+        for attempt in 1 2 3 4 5; do
+            sleep 2
             if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                 -o ConnectTimeout=5 -o BatchMode=yes \
                 -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
-                # SSH works — re-establish ControlMaster with proper host key check
                 _setup_ssh_control
                 if _ssh_target true 2>/dev/null; then
                     ssh_ok=true
@@ -1434,13 +1470,13 @@ _restore_and_sync_path() {
 
         if ! $ssh_ok; then
             log_error "${indent}  SSH connectivity lost after rsync of $path"
-            log_error "${indent}  Watchdog may have failed. Try: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
+            log_error "${indent}  Fixup script may have failed. Try: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
             report_ko "SSH connectivity lost after rsync of $path"
             failed_paths+=("$path")
             report_ko "Remaining paths skipped — SSH connection broken"
             return 1
         fi
-        log_info "${indent}  SSH recovered (watchdog re-injected user '${SSH_USER}')"
+        log_info "${indent}  SSH recovered after rsync of $path"
     fi
 
     # Check target disk space after rsync
@@ -1520,6 +1556,48 @@ phase2_restore_files() {
     local restore_start
     restore_start=$(date +%s)
     local total_restored_bytes=0
+
+    # Save SSH user identity from target BEFORE any restore overwrites /etc.
+    # The fixup script will re-inject the user + keys + host keys after each rsync/tar.
+    log_info "Saving SSH user '${SSH_USER}' identity from target before restore..."
+    local _sudo_save=""
+    [[ "$SSH_USER" != "root" ]] && _sudo_save="sudo "
+
+    local fixup_ok=false
+    if _ssh_target "${_sudo_save}bash -s" <<SAVE_EOF 2>/dev/null; then
+set -e
+SAVE_DIR="/tmp/computile-ssh-save"
+rm -rf "\$SAVE_DIR" && mkdir -p "\$SAVE_DIR/ssh"
+
+# User identity
+grep "^${SSH_USER}:" /etc/passwd > "\$SAVE_DIR/passwd_line" || true
+grep "^${SSH_USER}:" /etc/shadow > "\$SAVE_DIR/shadow_line" 2>/dev/null || true
+grep "^${SSH_USER}:" /etc/group > "\$SAVE_DIR/group_line" 2>/dev/null || true
+id -nG "${SSH_USER}" > "\$SAVE_DIR/groups" 2>/dev/null || true
+
+# Sudoers
+if [ -f "/etc/sudoers.d/${SSH_USER}" ]; then
+    cp "/etc/sudoers.d/${SSH_USER}" "\$SAVE_DIR/sudoers_file"
+fi
+
+# Authorized keys
+home=\$(eval echo "~${SSH_USER}")
+if [ -f "\${home}/.ssh/authorized_keys" ]; then
+    cp "\${home}/.ssh/authorized_keys" "\$SAVE_DIR/authorized_keys"
+fi
+echo "\${home}" > "\$SAVE_DIR/home_dir"
+
+# SSH host keys (preserve sshd identity so gateway can reconnect)
+cp /etc/ssh/ssh_host_* "\$SAVE_DIR/ssh/" 2>/dev/null || true
+cp /etc/ssh/sshd_config "\$SAVE_DIR/ssh/" 2>/dev/null || true
+SAVE_EOF
+        log_info "  Saved: user entry, groups, authorized_keys, host keys"
+        log_info "  Deploying SSH fixup script on target..."
+        _deploy_ssh_fixup
+        fixup_ok=true
+    else
+        log_warn "  Could not save SSH user identity — SSH may break after /etc restore"
+    fi
 
     # ── Streaming: try single full dump first (avoids ~15s overhead per path) ──
     if [[ "$USE_STREAMING" == true ]]; then
@@ -1615,60 +1693,24 @@ phase2_restore_files() {
     paths=("${sorted_paths[@]}")
     log_info "Restore order: ${paths[*]}"
 
-    # Build rsync command with sudo if needed
+    # Build rsync command with inline SSH fixup via --rsync-path wrapper.
+    # After rsync completes, the fixup script re-injects the SSH user + host keys
+    # within the SAME SSH session — no polling, no timing issues.
     local rsync_rsh
     rsync_rsh=$(_rsync_ssh_cmd)
     local -a rsync_opts=(-az -e "$rsync_rsh")
-    [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
     # Only exclude Coolify SSH keys — they are handled in Phase 3
     rsync_opts+=(
         --exclude='data/coolify/ssh/keys/'
         --exclude='data/coolify/ssh/id.*'
     )
-
-    # Save SSH user identity from target BEFORE rsync overwrites /etc
-    # After rsync we'll re-inject the user + key + sudoers so SSH stays alive
-    log_info "Saving SSH user '${SSH_USER}' identity from target before restore..."
-    local _sudo=""
-    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-
-    # Save critical files to a temp dir on the target (file copies, no quoting issues)
-    local watchdog_ok=false
-    if _ssh_target "${_sudo}bash -s" <<SAVE_EOF 2>/dev/null; then
-set -e
-SAVE_DIR="/tmp/computile-ssh-save"
-rm -rf "\$SAVE_DIR" && mkdir -p "\$SAVE_DIR/ssh"
-
-# User identity
-grep "^${SSH_USER}:" /etc/passwd > "\$SAVE_DIR/passwd_line" || true
-grep "^${SSH_USER}:" /etc/shadow > "\$SAVE_DIR/shadow_line" 2>/dev/null || true
-grep "^${SSH_USER}:" /etc/group > "\$SAVE_DIR/group_line" 2>/dev/null || true
-id -nG "${SSH_USER}" > "\$SAVE_DIR/groups" 2>/dev/null || true
-
-# Sudoers
-if [ -f "/etc/sudoers.d/${SSH_USER}" ]; then
-    cp "/etc/sudoers.d/${SSH_USER}" "\$SAVE_DIR/sudoers_file"
-fi
-
-# Authorized keys
-home=\$(eval echo "~${SSH_USER}")
-if [ -f "\${home}/.ssh/authorized_keys" ]; then
-    cp "\${home}/.ssh/authorized_keys" "\$SAVE_DIR/authorized_keys"
-fi
-echo "\${home}" > "\$SAVE_DIR/home_dir"
-
-# SSH host keys (preserve sshd identity so gateway can reconnect)
-cp /etc/ssh/ssh_host_* "\$SAVE_DIR/ssh/" 2>/dev/null || true
-cp /etc/ssh/sshd_config "\$SAVE_DIR/ssh/" 2>/dev/null || true
-SAVE_EOF
-        log_info "  Saved: user entry, groups, authorized_keys, host keys"
-
-        # Deploy watchdog
-        log_info "  Deploying SSH user watchdog on target..."
-        _deploy_ssh_watchdog
-        watchdog_ok=true
+    # Wrap remote rsync to run the SSH fixup script after each sync.
+    # The fixup re-injects the SSH user, authorized_keys, host keys, and restarts sshd.
+    # This runs in the SAME SSH session as rsync, before the connection closes.
+    if [[ "$SSH_USER" != "root" ]]; then
+        rsync_opts+=(--rsync-path="sudo bash -c 'rsync \"\$@\"; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC' --")
     else
-        log_warn "  Could not save SSH user identity — SSH may break after /etc restore"
+        rsync_opts+=(--rsync-path="bash -c 'rsync \"\$@\"; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC' --")
     fi
 
     # Restore and rsync each path individually to limit RAM usage
@@ -2269,8 +2311,8 @@ _verify_applications() {
 phase6_cleanup() {
     log_section "PHASE 6: Cleanup"
 
-    # Stop SSH watchdog if it's running (extract+rsync mode)
-    _stop_ssh_watchdog
+    # Remove SSH fixup script and saved identity from target
+    _cleanup_ssh_fixup
 
     if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" ]]; then
         if $SKIP_CLEANUP; then
