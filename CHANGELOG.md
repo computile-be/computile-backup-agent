@@ -4,6 +4,19 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.26.0] - 2026-03-14
+
+### Fixed
+- **Restore test**: fix Phase 3 losing Coolify SSH keys — keys were excluded from Phase 2 rsync and local temp cleaned before Phase 3 could use them. Now Phase 3 does a targeted `restic restore --include /data/coolify/ssh` and rsyncs keys directly
+- **Restore test**: fix Phase 4 never finding DB dumps — `$TEMP_RESTORE_DIR` was cleaned after Phase 2, so Phase 4 couldn't read local dumps. Now Phase 4 operates entirely on the target where dumps were already rsync'd
+- **Restore test**: fix Phase 3 APP_KEY read — old APP_KEY is now read from the target (where .env was rsync'd in Phase 2) before Coolify install overwrites it
+
+### Added
+- **Restore test**: SSH ControlMaster — reuses SSH connections across all phases for faster execution and reduced connection overhead
+- **Restore test**: full session log — all stdout/stderr tee'd to a timestamped log file alongside the report
+- **Restore test**: path ordering — `/data` is restored last to minimize risk of SSH breakage from Coolify files
+- **Restore test**: target disk space monitoring — warns if target drops below 2 GB during restore
+
 ## [1.25.0] - 2026-03-14
 
 ### Fixed

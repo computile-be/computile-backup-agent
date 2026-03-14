@@ -43,6 +43,9 @@ START_TIME=""
 ROLE=""
 RESTIC_REPOSITORY=""
 RESTIC_PASSWORD_FILE=""
+SSH_CONTROL_DIR=""
+SSH_CONTROL_SOCKET=""
+LOG_FILE=""
 
 # Report counters
 COUNT_OK=0
@@ -198,21 +201,46 @@ report_generate() {
 }
 
 # ──────────────────────────────────────────────
-# SSH helpers
+# SSH helpers (with ControlMaster for connection reuse)
 # ──────────────────────────────────────────────
+_ssh_common_opts() {
+    local -a opts=(
+        -o StrictHostKeyChecking=accept-new
+        -o ConnectTimeout=30
+        -p "$SSH_PORT"
+    )
+    if [[ -n "$SSH_CONTROL_SOCKET" ]]; then
+        opts+=(-o "ControlMaster=auto" -o "ControlPath=$SSH_CONTROL_SOCKET" -o "ControlPersist=300")
+    fi
+    echo "${opts[@]}"
+}
+
+_setup_ssh_control() {
+    SSH_CONTROL_DIR=$(mktemp -d /tmp/computile-ssh-XXXXXX)
+    SSH_CONTROL_SOCKET="${SSH_CONTROL_DIR}/ctrl-%r@%h:%p"
+    log_info "SSH ControlMaster enabled: $SSH_CONTROL_DIR"
+}
+
+_cleanup_ssh_control() {
+    if [[ -n "$SSH_CONTROL_SOCKET" ]]; then
+        ssh -o "ControlPath=$SSH_CONTROL_SOCKET" -O exit "${SSH_USER}@${TARGET}" 2>/dev/null || true
+    fi
+    if [[ -n "$SSH_CONTROL_DIR" && -d "$SSH_CONTROL_DIR" ]]; then
+        rm -rf "$SSH_CONTROL_DIR"
+    fi
+}
+
 _ssh_target() {
-    ssh -o StrictHostKeyChecking=accept-new \
-        -o ConnectTimeout=30 \
+    # shellcheck disable=SC2046
+    ssh $(_ssh_common_opts) \
         -o BatchMode=yes \
-        -p "$SSH_PORT" \
         "${SSH_USER}@${TARGET}" "$@"
 }
 
 _ssh_target_interactive() {
     # For commands that need a TTY (apt prompts, etc.)
-    ssh -o StrictHostKeyChecking=accept-new \
-        -o ConnectTimeout=30 \
-        -p "$SSH_PORT" \
+    # shellcheck disable=SC2046
+    ssh $(_ssh_common_opts) \
         -t \
         "${SSH_USER}@${TARGET}" "$@"
 }
@@ -220,10 +248,23 @@ _ssh_target_interactive() {
 _scp_to_target() {
     local src="$1"
     local dest="$2"
-    scp -o StrictHostKeyChecking=accept-new \
-        -o ConnectTimeout=30 \
-        -P "$SSH_PORT" \
-        "$src" "${SSH_USER}@${TARGET}:${dest}"
+    local -a scp_opts=(
+        -o StrictHostKeyChecking=accept-new
+        -o ConnectTimeout=30
+        -P "$SSH_PORT"
+    )
+    if [[ -n "$SSH_CONTROL_SOCKET" ]]; then
+        scp_opts+=(-o "ControlMaster=auto" -o "ControlPath=$SSH_CONTROL_SOCKET" -o "ControlPersist=300")
+    fi
+    scp "${scp_opts[@]}" "$src" "${SSH_USER}@${TARGET}:${dest}"
+}
+
+_rsync_ssh_cmd() {
+    local cmd="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}"
+    if [[ -n "$SSH_CONTROL_SOCKET" ]]; then
+        cmd+=" -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_SOCKET} -o ControlPersist=300"
+    fi
+    echo "$cmd"
 }
 
 # ──────────────────────────────────────────────
@@ -1010,6 +1051,17 @@ _restore_and_sync_path() {
         return 1
     fi
 
+    # Check target disk space after rsync
+    local target_avail_kb
+    target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
+    if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
+        local target_avail_gb=$((target_avail_kb / 1048576))
+        if [[ $target_avail_gb -lt 2 ]]; then
+            log_warn "${indent}  Target disk space critically low: ${target_avail_gb} GB remaining"
+            report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
+        fi
+    fi
+
     log_info "${indent}  $path done"
 }
 
@@ -1109,8 +1161,23 @@ phase2_restore_files() {
         log_warn "Could not determine snapshot size (restic stats timed out or failed) — progress percentage will not be shown"
     fi
 
+    # Sort paths: /data last to minimize risk of SSH breakage from Coolify files
+    local -a sorted_paths=()
+    local data_path=""
+    for path in "${paths[@]}"; do
+        if [[ "$path" == "/data" || "$path" == "/data/"* ]]; then
+            data_path="$path"
+        else
+            sorted_paths+=("$path")
+        fi
+    done
+    [[ -n "$data_path" ]] && sorted_paths+=("$data_path")
+    paths=("${sorted_paths[@]}")
+    log_info "Restore order: ${paths[*]}"
+
     # Build rsync command with sudo if needed
-    local rsync_rsh="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}"
+    local rsync_rsh
+    rsync_rsh=$(_rsync_ssh_cmd)
     local -a rsync_opts=(-az -e "$rsync_rsh")
     [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
     # Exclude SSH config to avoid breaking the active connection
@@ -1182,7 +1249,17 @@ phase3_platform() {
         return 0
     fi
 
-    # Step 1: Install Coolify on target
+    # Step 1: Save old APP_KEY from the backup (rsync'd to target in Phase 2)
+    log_info "Reading old APP_KEY from restored backup..."
+    local old_app_key
+    old_app_key=$(_ssh_target "grep '^APP_KEY=' /data/coolify/source/.env 2>/dev/null | cut -d= -f2" || true)
+    if [[ -n "$old_app_key" ]]; then
+        log_info "  Old APP_KEY saved"
+    else
+        log_warn "  Could not read old APP_KEY from backup"
+    fi
+
+    # Step 2: Install Coolify on target (generates new APP_KEY)
     log_info "Installing Coolify on target..."
     if _ssh_target "curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash" 2>&1; then
         report_ok "Coolify installed on target"
@@ -1191,57 +1268,60 @@ phase3_platform() {
         return 1
     fi
 
-    # Step 2: Save new APP_KEY
-    log_info "Saving new APP_KEY..."
+    # Step 3: Save new APP_KEY
+    log_info "Reading new APP_KEY..."
     local new_app_key
     new_app_key=$(_ssh_target "grep '^APP_KEY=' /data/coolify/source/.env 2>/dev/null | cut -d= -f2" || true)
     if [[ -z "$new_app_key" ]]; then
         report_warn "Could not read new APP_KEY"
     fi
 
-    # Step 3: Stop Coolify containers
+    # Step 4: Stop Coolify containers
     log_info "Stopping Coolify containers..."
     _ssh_target "docker stop coolify coolify-redis coolify-realtime coolify-proxy coolify-db 2>/dev/null || true"
     report_ok "Coolify containers stopped"
 
-    # Step 4: Restore /data/coolify files
-    # Files were already rsynced in Phase 2, but we need to fix permissions
-    log_info "Restoring Coolify SSH keys and fixing permissions..."
-    local restored_coolify="${TEMP_RESTORE_DIR}/data/coolify"
+    # Step 5: Restore Coolify SSH keys (excluded from Phase 2 rsync to protect SSH)
+    # Do a targeted restic restore + rsync just for SSH keys
+    log_info "Restoring Coolify SSH keys from backup..."
+    local ssh_temp
+    ssh_temp=$(mktemp -d /var/tmp/computile-coolify-ssh-XXXXXX)
 
-    if [[ -d "$restored_coolify" ]]; then
-        # Rsync the backed-up coolify data (overwrite the fresh install)
-        rsync -az \
-            -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p ${SSH_PORT}" \
-            "${restored_coolify}/" "${SSH_USER}@${TARGET}:/data/coolify/" 2>&1
+    if restic restore --no-lock "$SNAPSHOT_ID" \
+        --target "$ssh_temp" --include "/data/coolify/ssh" \
+        >"${ssh_temp}.log" 2>&1; then
 
-        # Fix SSH key permissions
-        _ssh_target "
-            if [[ -d /data/coolify/ssh/keys ]]; then
-                chown -R root:root /data/coolify/ssh/keys/
-                chmod 600 /data/coolify/ssh/keys/* 2>/dev/null || true
-            fi
-        "
+        if [[ -d "${ssh_temp}/data/coolify/ssh" ]]; then
+            local rsync_rsh
+            rsync_rsh=$(_rsync_ssh_cmd)
+            rsync -az -e "$rsync_rsh" \
+                "${ssh_temp}/data/coolify/ssh/" "${SSH_USER}@${TARGET}:/data/coolify/ssh/" 2>&1
 
-        local key_count
-        key_count=$(_ssh_target "ls /data/coolify/ssh/keys/ 2>/dev/null | wc -l" || echo "0")
-        report_ok "Coolify data restored (${key_count} SSH keys)"
+            # Fix SSH key permissions
+            _ssh_target "
+                if [[ -d /data/coolify/ssh/keys ]]; then
+                    chown -R root:root /data/coolify/ssh/keys/
+                    chmod 600 /data/coolify/ssh/keys/* 2>/dev/null || true
+                fi
+            "
+
+            local key_count
+            key_count=$(_ssh_target "ls /data/coolify/ssh/keys/ 2>/dev/null | wc -l" || echo "0")
+            report_ok "Coolify SSH keys restored (${key_count} keys)"
+        else
+            report_warn "No /data/coolify/ssh found in backup"
+        fi
     else
-        report_warn "No /data/coolify found in backup"
+        log_error "  Restic restore of Coolify SSH keys failed"
+        report_ko "Coolify SSH keys restore failed"
     fi
+    rm -rf "$ssh_temp" "${ssh_temp}.log"
 
-    # Step 5: Configure APP_PREVIOUS_KEYS
+    # Step 6: Configure APP_PREVIOUS_KEYS
     log_info "Configuring APP_PREVIOUS_KEYS..."
-    local old_app_key
-    if [[ -f "${restored_coolify}/source/.env" ]]; then
-        old_app_key=$(grep '^APP_KEY=' "${restored_coolify}/source/.env" 2>/dev/null | cut -d= -f2 || true)
-    fi
-
     if [[ -n "$old_app_key" && -n "$new_app_key" && "$old_app_key" != "$new_app_key" ]]; then
         _ssh_target "
-            # Remove any existing APP_PREVIOUS_KEYS line
             sed -i '/^APP_PREVIOUS_KEYS=/d' /data/coolify/source/.env
-            # Add the old key
             echo 'APP_PREVIOUS_KEYS=${old_app_key}' >> /data/coolify/source/.env
         "
         report_ok "APP_PREVIOUS_KEYS configured"
@@ -1251,7 +1331,7 @@ phase3_platform() {
         report_warn "Could not configure APP_PREVIOUS_KEYS (missing keys)"
     fi
 
-    # Step 6: Restart Coolify
+    # Step 7: Restart Coolify
     log_info "Restarting Coolify..."
     if _ssh_target "curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash" 2>&1; then
         report_ok "Coolify restarted"
@@ -1292,10 +1372,11 @@ phase4_databases() {
         return 0
     fi
 
-    local dump_base="${TEMP_RESTORE_DIR}/var/backups/computile/db"
+    # DB dumps were rsync'd to target in Phase 2 — operate remotely
+    local dump_base="/var/backups/computile/db"
 
-    if [[ ! -d "$dump_base" ]]; then
-        report_skip "No database dumps found in snapshot"
+    if ! _ssh_target "test -d '$dump_base'" 2>/dev/null; then
+        report_skip "No database dumps found on target"
         return 0
     fi
 
@@ -1360,25 +1441,23 @@ _parse_dump_filename() {
 }
 
 _restore_mysql_dumps() {
-    local mysql_dir="$1"
-    [[ -d "$mysql_dir" ]] || return 0
+    local mysql_dir="$1"  # remote path on target
 
-    local dumps=()
-    while IFS= read -r -d '' f; do
-        dumps+=("$f")
-    done < <(find "$mysql_dir" -name '*.sql.gz' -print0 2>/dev/null)
+    # List dumps on target
+    local dump_list
+    dump_list=$(_ssh_target "find '$mysql_dir' -name '*.sql.gz' 2>/dev/null") || true
+    [[ -z "$dump_list" ]] && return 0
 
-    if [[ ${#dumps[@]} -eq 0 ]]; then
-        return 0
-    fi
+    local dump_count
+    dump_count=$(echo "$dump_list" | wc -l)
+    log_info "Found ${dump_count} MySQL dump(s) on target"
 
-    log_info "Found ${#dumps[@]} MySQL dump(s)"
-
-    for dump in "${dumps[@]}"; do
+    while IFS= read -r dump_path; do
+        [[ -z "$dump_path" ]] && continue
         local filename
-        filename=$(basename "$dump")
+        filename=$(basename "$dump_path")
         local dump_size
-        dump_size=$(stat -c%s "$dump" 2>/dev/null || echo 0)
+        dump_size=$(_ssh_target "stat -c%s '${dump_path}'" 2>/dev/null || echo "0")
         local size_human
         size_human=$(_human_size "$dump_size")
 
@@ -1398,7 +1477,6 @@ _restore_mysql_dumps() {
         fi
 
         if [[ -z "$target_container" ]]; then
-            # Try to find any MySQL container
             target_container=$(_ssh_target "docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -iE 'mysql|mariadb' | head -1 | cut -f1" || true)
         fi
 
@@ -1407,15 +1485,10 @@ _restore_mysql_dumps() {
             continue
         fi
 
-        # Wait for container
         if ! _wait_for_container "$target_container" 60; then
             report_ko "${container}/${db} (mysql, ${size_human}): container not ready"
             continue
         fi
-
-        # Transfer and import
-        local remote_tmp="/tmp/restore-dump-${filename}"
-        _scp_to_target "$dump" "$remote_tmp"
 
         # Extract MySQL password from container env
         local mysql_pass
@@ -1424,36 +1497,32 @@ _restore_mysql_dumps() {
         local pass_arg=""
         [[ -n "$mysql_pass" ]] && pass_arg="-p${mysql_pass}"
 
-        if _ssh_target "gunzip -c '${remote_tmp}' | docker exec -i '${target_container}' mysql -u root ${pass_arg} '${db}'" 2>&1; then
+        # Import directly from target filesystem (no SCP needed)
+        if _ssh_target "gunzip -c '${dump_path}' | docker exec -i '${target_container}' mysql -u root ${pass_arg} '${db}'" 2>&1; then
             report_ok "${container}/${db} (mysql, ${size_human})"
         else
             report_ko "${container}/${db} (mysql, ${size_human}): import failed"
         fi
-
-        _ssh_target "rm -f '${remote_tmp}'" 2>/dev/null || true
-    done
+    done <<< "$dump_list"
 }
 
 _restore_postgres_dumps() {
-    local pg_dir="$1"
-    [[ -d "$pg_dir" ]] || return 0
+    local pg_dir="$1"  # remote path on target
 
-    local dumps=()
-    while IFS= read -r -d '' f; do
-        dumps+=("$f")
-    done < <(find "$pg_dir" -name '*.sql.gz' -print0 2>/dev/null)
+    local dump_list
+    dump_list=$(_ssh_target "find '$pg_dir' -name '*.sql.gz' 2>/dev/null") || true
+    [[ -z "$dump_list" ]] && return 0
 
-    if [[ ${#dumps[@]} -eq 0 ]]; then
-        return 0
-    fi
+    local dump_count
+    dump_count=$(echo "$dump_list" | wc -l)
+    log_info "Found ${dump_count} PostgreSQL dump(s) on target"
 
-    log_info "Found ${#dumps[@]} PostgreSQL dump(s)"
-
-    for dump in "${dumps[@]}"; do
+    while IFS= read -r dump_path; do
+        [[ -z "$dump_path" ]] && continue
         local filename
-        filename=$(basename "$dump")
+        filename=$(basename "$dump_path")
         local dump_size
-        dump_size=$(stat -c%s "$dump" 2>/dev/null || echo 0)
+        dump_size=$(_ssh_target "stat -c%s '${dump_path}'" 2>/dev/null || echo "0")
         local size_human
         size_human=$(_human_size "$dump_size")
 
@@ -1486,46 +1555,40 @@ _restore_postgres_dumps() {
             continue
         fi
 
-        # Transfer and import
-        local remote_tmp="/tmp/restore-dump-${filename}"
-        _scp_to_target "$dump" "$remote_tmp"
-
         # Determine postgres user
         local pg_user
         pg_user=$(_ssh_target "docker exec ${target_container} env 2>/dev/null | grep '^POSTGRES_USER=' | cut -d= -f2" || true)
         pg_user="${pg_user:-postgres}"
 
-        if _ssh_target "gunzip -c '${remote_tmp}' | docker exec -i '${target_container}' psql -U '${pg_user}' -d '${db}'" 2>&1; then
+        # Import directly from target filesystem
+        if _ssh_target "gunzip -c '${dump_path}' | docker exec -i '${target_container}' psql -U '${pg_user}' -d '${db}'" 2>&1; then
             report_ok "${container}/${db} (postgres, ${size_human})"
         else
             report_ko "${container}/${db} (postgres, ${size_human}): import failed"
         fi
-
-        _ssh_target "rm -f '${remote_tmp}'" 2>/dev/null || true
-    done
+    done <<< "$dump_list"
 }
 
 _restore_redis_dumps() {
-    local redis_dir="$1"
-    [[ -d "$redis_dir" ]] || return 0
+    local redis_dir="$1"  # remote path on target
 
-    local dumps=()
-    while IFS= read -r -d '' f; do
-        dumps+=("$f")
-    done < <(find "$redis_dir" -name '*.rdb' -print0 2>/dev/null)
-
-    if [[ ${#dumps[@]} -eq 0 ]]; then
+    local dump_list
+    dump_list=$(_ssh_target "find '$redis_dir' -name '*.rdb' 2>/dev/null") || true
+    if [[ -z "$dump_list" ]]; then
         report_skip "Redis (no dumps found)"
         return 0
     fi
 
-    log_info "Found ${#dumps[@]} Redis dump(s)"
+    local dump_count
+    dump_count=$(echo "$dump_list" | wc -l)
+    log_info "Found ${dump_count} Redis dump(s) on target"
 
-    for dump in "${dumps[@]}"; do
+    while IFS= read -r dump_path; do
+        [[ -z "$dump_path" ]] && continue
         local filename
-        filename=$(basename "$dump")
+        filename=$(basename "$dump_path")
         local dump_size
-        dump_size=$(stat -c%s "$dump" 2>/dev/null || echo 0)
+        dump_size=$(_ssh_target "stat -c%s '${dump_path}'" 2>/dev/null || echo "0")
         local size_human
         size_human=$(_human_size "$dump_size")
 
@@ -1553,23 +1616,18 @@ _restore_redis_dumps() {
             continue
         fi
 
-        # Transfer RDB file and copy into container
-        local remote_tmp="/tmp/restore-dump-${filename}"
-        _scp_to_target "$dump" "$remote_tmp"
-
+        # Import directly from target filesystem
         if _ssh_target "
             docker exec '${target_container}' redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
             sleep 2
-            docker cp '${remote_tmp}' '${target_container}:/data/dump.rdb'
+            docker cp '${dump_path}' '${target_container}:/data/dump.rdb'
             docker start '${target_container}' 2>/dev/null || true
         " 2>&1; then
             report_ok "${container} (redis, ${size_human})"
         else
             report_ko "${container} (redis, ${size_human}): restore failed"
         fi
-
-        _ssh_target "rm -f '${remote_tmp}'" 2>/dev/null || true
-    done
+    done <<< "$dump_list"
 }
 
 # ──────────────────────────────────────────────
@@ -1769,6 +1827,9 @@ cleanup_on_exit() {
         log_info "Cleaning up temp directory: $TEMP_RESTORE_DIR"
         rm -rf "$TEMP_RESTORE_DIR"
     fi
+
+    # Close SSH ControlMaster
+    _cleanup_ssh_control
 }
 
 _on_interrupt() {
@@ -1806,6 +1867,12 @@ main() {
 
     START_TIME=$(date +%s)
 
+    # Set up full session log (all stdout+stderr tee'd to file)
+    mkdir -p "$REPORT_DIR"
+    LOG_FILE="${REPORT_DIR}/restore-test-session-$(date '+%Y%m%d-%H%M%S').log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    log_info "Full session log: $LOG_FILE"
+
     echo ""
     echo "╔══════════════════════════════════════════╗"
     echo "║   COMPUTILE RESTORE TEST                 ║"
@@ -1814,6 +1881,9 @@ main() {
 
     # Phase 0: Selection
     phase0_select
+
+    # Setup SSH ControlMaster (reuse connections for performance)
+    _setup_ssh_control
 
     # Confirm in interactive mode
     if [[ "$INTERACTIVE" == true ]]; then
