@@ -4,24 +4,24 @@
 # Copy to /etc/computile-backup/backup-agent.conf and edit.
 # ================================================================
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Identity
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 CLIENT_ID="client-name"
 HOST_ID="vps-prod-01"
 ENVIRONMENT="prod"          # prod, staging, dev
 ROLE="coolify"              # coolify, forge, hybrid, docker, bare
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Restic repository (via SFTP over Tailscale)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 RESTIC_REPOSITORY="sftp:backup-${CLIENT_ID}@backup-gateway:/srv/backups/backup-${CLIENT_ID}/data/${HOST_ID}"
 RESTIC_PASSWORD_FILE="/etc/computile-backup/restic-password"
 # RESTIC_CACHE_DIR="/var/cache/restic"
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Paths
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 BACKUP_ROOT="/var/backups/computile"
 LOG_FILE="/var/log/computile-backup.log"
 
@@ -40,17 +40,17 @@ INCLUDE_PATHS=(
 # Exclusion file (one pattern per line)
 EXCLUDE_FILE="/etc/computile-backup/excludes.txt"
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Retention policy
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 RETENTION_KEEP_DAILY=7
 RETENTION_KEEP_WEEKLY=4
 RETENTION_KEEP_MONTHLY=6
 RETENTION_KEEP_YEARLY=2
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Docker & database discovery
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 DOCKER_ENABLED="yes"
 DOCKER_DB_AUTO_DISCOVERY="yes"
 
@@ -62,9 +62,9 @@ REDIS_SNAPSHOT_ENABLED="no"    # "yes" to enable Redis BGSAVE snapshots
 # Days to keep local dump files before cleanup
 DUMP_CLEANUP_DAYS=3
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Host-level databases (Forge, bare metal, etc.)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Enable this for servers where MySQL/PostgreSQL runs directly on the host
 # (not in Docker containers). Common with Laravel Forge, Ploi, etc.
 HOST_DB_ENABLED="no"
@@ -78,9 +78,9 @@ HOST_DB_ENABLED="no"
 # HOST_POSTGRES_USER="postgres"
 # HOST_POSTGRES_DATABASES=""    # comma-separated, empty = all non-template DBs
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Manual database entries (optional, Docker only)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Format: "container_name|db_type|user|password|databases"
 # - db_type: mysql, postgres, redis
 # - databases: comma-separated list, or empty for all
@@ -92,9 +92,9 @@ HOST_DB_ENABLED="no"
 #     "custom-pg|postgres|myuser|mypassword|mydb"
 # )
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Email notifications (via msmtp)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 EMAIL_ENABLED="yes"
 EMAIL_TO="alerts@computile.be"
 EMAIL_FROM="backup@computile.email"
@@ -106,16 +106,16 @@ SMTP_PORT="587"
 SMTP_USER="backup@computile.email"
 SMTP_PASS_FILE="/etc/computile-backup/smtp-password"
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Healthcheck ping (healthchecks.io, Uptime Kuma, etc.)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Pings this URL on success, or URL/fail on failure.
 # Leave empty to disable.
 # HEALTHCHECK_URL="https://hc-ping.com/your-uuid-here"
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Bandwidth & performance
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Limit upload speed in KB/s (0 = unlimited)
 # RESTIC_UPLOAD_LIMIT_KB=0
 
@@ -125,14 +125,14 @@ SMTP_PASS_FILE="/etc/computile-backup/smtp-password"
 # Minimum free disk space in MB before starting dumps (default: 500)
 # DUMP_MIN_SPACE_MB=500
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Verification
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 VERIFY_AFTER_BACKUP="yes"
 VERIFY_CHECK_DATA="no"        # "yes" to run restic check --read-data-subset
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Misc
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 VERBOSE="no"
 DRY_RUN="no"

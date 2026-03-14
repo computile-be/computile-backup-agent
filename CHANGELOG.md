@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.4] - 2026-03-14
+
+### Fixed
+- **Config file encoding**: replaced Unicode box-drawing separators (`─`) with ASCII dashes (`-`) in config template — fixes garbled display when metadata is viewed on systems without UTF-8 support
+- **Config migration compatibility**: section parser now detects both ASCII and Unicode separators, so `--update` works correctly on existing configs with either format
+
 ## [1.8.3] - 2026-03-14
 
 ### Fixed

@@ -849,11 +849,16 @@ _update_config() {
         return 1
     }
 
+    # Detect section separator lines: "# ------..." or "# ──────..." (ASCII or Unicode)
+    _is_separator() {
+        [[ "$1" == "# "---* ]] || [[ "$1" == "# "───* ]]
+    }
+
     # Parse example config into sections
     # Format: delimiter line / title line / delimiter line / body lines
-    # e.g.:  # ──────────────────────────────────────────────
+    # e.g.:  # ----------------------------------------------
     #        # Healthcheck ping (healthchecks.io, ...)
-    #        # ──────────────────────────────────────────────
+    #        # ----------------------------------------------
     #        content...
 
     local -a elines=()
@@ -867,17 +872,17 @@ _update_config() {
 
     local ei=0
     while [[ $ei -lt $etotal ]]; do
-        if [[ "${elines[$ei]}" =~ ^#\ ─{3,} ]]; then
+        if _is_separator "${elines[$ei]}"; then
             local enext=$((ei + 1))
             local enext2=$((ei + 2))
-            if [[ $enext2 -lt $etotal ]] && [[ "${elines[$enext2]}" =~ ^#\ ─{3,} ]]; then
+            if [[ $enext2 -lt $etotal ]] && _is_separator "${elines[$enext2]}"; then
                 local stitle="${elines[$enext]}"
                 local body_start=$((enext2 + 1))
 
                 local sbody=""
                 local ej=$body_start
                 while [[ $ej -lt $etotal ]]; do
-                    [[ "${elines[$ej]}" =~ ^#\ ─{3,} ]] && break
+                    _is_separator "${elines[$ej]}" && break
                     sbody+="${elines[$ej]}"$'\n'
                     ((ej++))
                 done
@@ -931,9 +936,9 @@ _update_config() {
         local body="${section_bodies[$i]}"
 
         local block=""
-        block+="# ──────────────────────────────────────────────"$'\n'
+        block+="# ----------------------------------------------"$'\n'
         block+="${title}"$'\n'
-        block+="# ──────────────────────────────────────────────"$'\n'
+        block+="# ----------------------------------------------"$'\n'
         block+="${body}"
         section_blocks+=("$block")
     done
@@ -965,9 +970,9 @@ _update_config() {
                 local body="${section_bodies[$i]}"
 
                 echo ""
-                echo "# ──────────────────────────────────────────────"
+                echo "# ----------------------------------------------"
                 echo "${title}"
-                echo "# ──────────────────────────────────────────────"
+                echo "# ----------------------------------------------"
 
                 while IFS= read -r line; do
                     [[ -z "$line" ]] && continue
