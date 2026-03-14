@@ -379,6 +379,47 @@ _tui_input_target() {
     echo "$target"
 }
 
+_tui_input_ssh_user() {
+    local user
+    user=$($DIALOG --title "Restore Test — SSH User" \
+        --inputbox "SSH user on the target VM:" \
+        10 $WT_WIDTH "$SSH_USER" \
+        3>&1 1>&2 2>&3) || return 1
+
+    echo "$user"
+}
+
+_tui_ssh_key_check() {
+    # Find the gateway's SSH public key
+    local pub_key=""
+    local key_file=""
+    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
+        if [[ -f "$f" ]]; then
+            pub_key=$(cat "$f")
+            key_file="$f"
+            break
+        fi
+    done
+
+    if [[ -z "$pub_key" ]]; then
+        _msg_box "Restore Test — SSH Key" \
+            "No SSH public key found on this gateway.\n\nGenerate one with:\n  ssh-keygen -t ed25519\n\nThen re-run the restore test."
+        return 1
+    fi
+
+    local msg="Before connecting, you must add this gateway's SSH public key\n"
+    msg+="to the target VM (${SSH_USER}@${TARGET}).\n\n"
+    msg+="Key (${key_file}):\n\n"
+    msg+="${pub_key}\n\n"
+    msg+="On the target VM, run:\n"
+    msg+="  mkdir -p ~/.ssh && echo '${pub_key}' >> ~/.ssh/authorized_keys\n\n"
+    msg+="Have you added this key to the target VM?"
+
+    if ! _yesno "Restore Test — SSH Key Setup" "$msg"; then
+        return 1
+    fi
+}
+
 # ──────────────────────────────────────────────
 # Argument parsing
 # ──────────────────────────────────────────────
@@ -456,6 +497,10 @@ phase0_select() {
 
         SNAPSHOT_ID=$(_tui_select_snapshot) || exit 1
         TARGET=$(_tui_input_target) || exit 1
+        SSH_USER=$(_tui_input_ssh_user) || exit 1
+
+        # Show SSH key and ask user to confirm it's on the target
+        _tui_ssh_key_check || exit 1
     fi
 
     # Validate required parameters
