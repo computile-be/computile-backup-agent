@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.29.1] - 2026-03-14
+
+### Fixed
+- **Restore test**: rewrite SSH watchdog with file-based save (no quoting issues), restore host keys + sshd_config, clear known_hosts before reconnecting, increase retry to 10 attempts
+
 ## [1.29.0] - 2026-03-14
 
 ### Added
