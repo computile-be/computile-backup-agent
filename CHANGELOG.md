@@ -4,6 +4,15 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.12.0] - 2026-03-14
+
+### Fixed
+- **database.sh**: quote `$mysql_bin`/`$mysqldump_bin` in docker exec commands to prevent word splitting; handle empty `docker_env_args` array safely
+- **backup-agent.sh**: validate `last_epoch` and `disk_avail_mb` are numeric before arithmetic in health check — prevents crash on unexpected systemd/df output
+- **restic.sh**: check `mktemp` success in `sync_meta_to_gateway` before writing SFTP batch file
+- **install.sh**: check `mktemp -d` success; use restrictive `umask 077` when creating password files to close permissions race window
+- **gateway manager**: fix temp file leak in restore browser (entries_file now created once and cleaned in trap); validate SSH keys with `ssh-keygen -l` instead of regex, strip newlines to prevent authorized_keys injection
+
 ## [1.11.2] - 2026-03-14
 
 ### Changed

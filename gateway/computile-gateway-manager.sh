@@ -1105,9 +1105,10 @@ add_user_key() {
         return
     fi
 
-    # Validate it looks like an SSH key
-    if [[ ! "$pubkey" =~ ^ssh- ]] && [[ ! "$pubkey" =~ ^ecdsa- ]]; then
-        msg_box "Error" "This doesn't look like an SSH public key.\nExpected: ssh-ed25519, ssh-rsa, ecdsa-sha2-..."
+    # Strip newlines and validate using ssh-keygen
+    pubkey=$(echo "$pubkey" | tr -d '\n\r')
+    if ! echo "$pubkey" | ssh-keygen -l -f /dev/stdin &>/dev/null; then
+        msg_box "Error" "Invalid SSH public key format.\nKey must be a valid OpenSSH public key (ssh-rsa, ssh-ed25519, ecdsa-sha2, etc.)"
         return
     fi
 
@@ -2169,9 +2170,10 @@ _restore_browse() {
 
     # Cache the full file listing with metadata
     # restic ls --long format: perms uid gid size date time path
-    local cache_file
+    local cache_file entries_file
     cache_file=$(mktemp /tmp/restic-browse-XXXXXX) || return
-    trap "rm -f '$cache_file'" RETURN
+    entries_file=$(mktemp /tmp/restic-entries-XXXXXX) || return
+    trap "rm -f '$cache_file' '$entries_file'" RETURN
 
     $DIALOG --title "Browse" --infobox "Loading file list from snapshot ${snapshot_id}..." 5 $WT_WIDTH
     restic ls --long --no-lock "$snapshot_id" 2>/dev/null > "$cache_file" || {
@@ -2183,9 +2185,6 @@ _restore_browse() {
         # Use awk to extract direct children of current_dir with metadata
         # restic ls --long fields: $1=perms $2=uid $3=gid $4=size $5=date $6=time $7+=path
         # Output: name\ttype\tsize\tdate
-        local entries_file
-        entries_file=$(mktemp /tmp/restic-entries-XXXXXX) || return
-
         awk -v dir="$current_dir" '
         {
             perms=$1; size=$4; date=$5
@@ -2227,7 +2226,6 @@ _restore_browse() {
                 menu_items+=("$name" "${date}  ${hsize}")
             fi
         done < "$entries_file"
-        rm -f "$entries_file"
 
         if [[ ${#menu_items[@]} -eq 0 ]]; then
             msg_box "Browse" "No entries in ${current_dir}"

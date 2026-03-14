@@ -137,7 +137,7 @@ install_restic() {
     local url="https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${arch}.bz2"
 
     local tmp_dir
-    tmp_dir=$(mktemp -d)
+    tmp_dir=$(mktemp -d) || die "Failed to create temp directory"
     local tmp_bz2="${tmp_dir}/restic.bz2"
     trap 'rm -rf "${tmp_dir:?}"' RETURN
 
@@ -517,7 +517,7 @@ _setup_secrets() {
 
     # Restic password
     if [[ ! -f "${CONFIG_DIR}/restic-password" ]]; then
-        head -c 32 /dev/urandom | base64 | tr -d '\n' > "${CONFIG_DIR}/restic-password"
+        ( umask 077; head -c 32 /dev/urandom | base64 | tr -d '\n' > "${CONFIG_DIR}/restic-password" )
         chmod 600 "${CONFIG_DIR}/restic-password"
         info "Generated random restic password in ${CONFIG_DIR}/restic-password"
         warn "SAVE THIS PASSWORD SECURELY — it is required to restore backups!"
@@ -526,10 +526,10 @@ _setup_secrets() {
     # SMTP password
     if [[ ! -f "${CONFIG_DIR}/smtp-password" ]] || [[ -n "$smtp_password" ]]; then
         if [[ -n "$smtp_password" ]]; then
-            echo -n "$smtp_password" > "${CONFIG_DIR}/smtp-password"
+            ( umask 077; echo -n "$smtp_password" > "${CONFIG_DIR}/smtp-password" )
             info "SMTP password saved to ${CONFIG_DIR}/smtp-password"
         else
-            touch "${CONFIG_DIR}/smtp-password"
+            ( umask 077; touch "${CONFIG_DIR}/smtp-password" )
             info "Created ${CONFIG_DIR}/smtp-password — add your SMTP password to this file"
         fi
         chmod 600 "${CONFIG_DIR}/smtp-password"
@@ -538,7 +538,7 @@ _setup_secrets() {
     # MySQL password (host-level)
     if [[ ! -f "${CONFIG_DIR}/mysql-password" ]] || [[ -n "$host_mysql_password" ]]; then
         if [[ -n "$host_mysql_password" ]]; then
-            echo -n "$host_mysql_password" > "${CONFIG_DIR}/mysql-password"
+            ( umask 077; echo -n "$host_mysql_password" > "${CONFIG_DIR}/mysql-password" )
             chmod 600 "${CONFIG_DIR}/mysql-password"
             info "MySQL password saved to ${CONFIG_DIR}/mysql-password"
         fi

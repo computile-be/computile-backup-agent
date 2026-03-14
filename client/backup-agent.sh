@@ -231,7 +231,7 @@ run_health_check() {
     if [[ -n "$last_timestamp" ]] && [[ "$last_timestamp" != "" ]]; then
         local last_epoch
         last_epoch=$(date -d "$last_timestamp" '+%s' 2>/dev/null) || true
-        if [[ -n "$last_epoch" ]]; then
+        if [[ -n "$last_epoch" ]] && [[ "$last_epoch" =~ ^[0-9]+$ ]]; then
             local now_epoch
             now_epoch=$(date '+%s')
             last_age_hours=$(( (now_epoch - last_epoch) / 3600 ))
@@ -246,7 +246,7 @@ run_health_check() {
     local disk_avail_mb=""
     if [[ -d "$backup_root" ]]; then
         disk_avail_mb=$(df -k "$backup_root" 2>/dev/null | awk 'NR==2 {print int($4/1024)}') || true
-        if [[ -n "$disk_avail_mb" ]] && [[ "$disk_avail_mb" -lt 500 ]] 2>/dev/null; then
+        if [[ -n "$disk_avail_mb" ]] && [[ "$disk_avail_mb" =~ ^[0-9]+$ ]] && [[ "$disk_avail_mb" -lt 500 ]]; then
             issues+=("low disk space: ${disk_avail_mb} MB free (<500 MB)")
         fi
     fi

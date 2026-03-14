@@ -435,7 +435,7 @@ sync_meta_to_gateway() {
 
     # Build SFTP batch commands
     local batch_file
-    batch_file=$(mktemp)
+    batch_file=$(mktemp) || { log_error "Failed to create temp file for SFTP batch"; return 1; }
     trap "rm -f '$batch_file'" RETURN
 
     # Create directory structure

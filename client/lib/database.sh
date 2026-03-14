@@ -82,8 +82,8 @@ dump_mysql() {
     else
         # List all databases, excluding system ones
         local db_list
-        db_list=$(docker exec "${docker_env_args[@]}" "$container_id" \
-            $mysql_bin -u "$db_user" -N -e "SHOW DATABASES;" 2>/dev/null \
+        db_list=$(docker exec ${docker_env_args[@]+"${docker_env_args[@]}"} "$container_id" \
+            "$mysql_bin" -u "$db_user" -N -e "SHOW DATABASES;" 2>/dev/null \
             | grep -Ev '^(information_schema|performance_schema|mysql|sys)$') || {
             log_error "Failed to list databases in container $container_name"
             return 1
@@ -113,8 +113,8 @@ dump_mysql() {
             continue
         fi
 
-        if docker exec "${docker_env_args[@]}" "$container_id" \
-            $mysqldump_bin -u "$db_user" \
+        if docker exec ${docker_env_args[@]+"${docker_env_args[@]}"} "$container_id" \
+            "$mysqldump_bin" -u "$db_user" \
             --single-transaction \
             --routines \
             --triggers \
