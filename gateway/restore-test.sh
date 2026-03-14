@@ -1366,7 +1366,8 @@ phase1_preflight() {
     fi
 
     # Ensure passwordless sudo for SSH_USER (required for all restore operations)
-    if ! $DRY_RUN && [[ "$SSH_USER" != "root" ]]; then
+    # Skip when resuming from a later phase — user may have configured target manually
+    if ! $DRY_RUN && [[ "$SSH_USER" != "root" ]] && [[ $START_FROM_PHASE -le 1 ]]; then
         log_info "Checking passwordless sudo for ${SSH_USER}..."
         if _ssh_target "sudo -n true" &>/dev/null; then
             report_ok "Passwordless sudo for ${SSH_USER}"
