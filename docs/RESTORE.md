@@ -421,7 +421,6 @@ sudo computile-restore-test \
 | `--interactive` | Mode TUI avec sélection guidée |
 | `--ssh-user USER` | User SSH sur la cible (défaut : `computile-restore`) |
 | `--ssh-port PORT` | Port SSH (défaut : `22`) |
-| `--no-streaming` | Forcer le mode extract+rsync (désactiver le streaming) |
 | `--skip-db-restore` | Ignorer la restauration des bases de données |
 | `--skip-cleanup` | Conserver les fichiers temporaires |
 | `--report-dir DIR` | Répertoire de sortie du rapport |

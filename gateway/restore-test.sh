@@ -37,7 +37,6 @@ START_FROM_PHASE=1
 REPORT_DIR="$DEFAULT_REPORT_DIR"
 
 # Runtime state
-TEMP_RESTORE_DIR=""
 REPORT_FILE=""
 REPORT_BUFFER=""
 START_TIME=""
@@ -47,8 +46,8 @@ RESTIC_PASSWORD_FILE=""
 SSH_CONTROL_DIR=""
 SSH_CONTROL_SOCKET=""
 LOG_FILE=""
-USE_STREAMING=false
-NO_STREAMING=false
+
+
 # Report counters
 COUNT_OK=0
 COUNT_KO=0
@@ -286,17 +285,20 @@ SAVE_DIR="/tmp/computile-ssh-save"
 
 cat > /tmp/computile-ssh-fixup.sh <<'FIXUP_SCRIPT'
 #!/bin/bash
+DBG=/tmp/computile-fixup-debug.log
+echo "[fixup] START $(date '+%H:%M:%S') pid=$$ uid=$(id -u)" >> "$DBG"
 SAVE_DIR="/tmp/computile-ssh-save"
-[ ! -d "$SAVE_DIR" ] && exit 0
+[ ! -d "$SAVE_DIR" ] && { echo "[fixup] no save dir, exit" >> "$DBG"; exit 0; }
 
 USER_LINE=$(cat "$SAVE_DIR/passwd_line" 2>/dev/null)
-[ -z "$USER_LINE" ] && exit 0
+[ -z "$USER_LINE" ] && { echo "[fixup] no passwd_line, exit" >> "$DBG"; exit 0; }
 
 USERNAME=$(echo "$USER_LINE" | cut -d: -f1)
 USER_UID=$(echo "$USER_LINE" | cut -d: -f3)
 USER_GID=$(echo "$USER_LINE" | cut -d: -f4)
 USER_HOME=$(cat "$SAVE_DIR/home_dir" 2>/dev/null)
 RESTORED_PATH=$(cat /tmp/computile-restore-current-path 2>/dev/null || echo "")
+echo "[fixup] user=$USERNAME uid=$USER_UID path=$RESTORED_PATH" >> "$DBG"
 
 # ── Layer 1: ALWAYS restore authorized_keys (both locations) ──
 # Home-based authorized_keys
@@ -335,6 +337,7 @@ case "$RESTORED_PATH" in
     /)           is_etc_restore=true ;;  # full dump = everything including /etc
     "")          is_etc_restore=true ;;  # unknown path = full fixup (safety)
 esac
+echo "[fixup] is_etc_restore=$is_etc_restore (path='$RESTORED_PATH')" >> "$DBG"
 
 if $is_etc_restore; then
     sed -i "/^${USERNAME}:/d" /etc/passwd 2>/dev/null || true
@@ -356,12 +359,15 @@ if $is_etc_restore; then
         done
     fi
 
+    mkdir -p /etc/sudoers.d 2>/dev/null || true
     if [ -f "$SAVE_DIR/sudoers_file" ]; then
         cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
     else
         echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${USERNAME}"
     fi
     chmod 440 "/etc/sudoers.d/${USERNAME}"
+    # Debug trace — remove once verified
+    echo "[fixup] sudoers: is_etc=$is_etc_restore user=$USERNAME file=$(ls -la /etc/sudoers.d/${USERNAME} 2>&1)" >> /tmp/computile-fixup-debug.log
 
     # Restore PAM + nsswitch (critical for SSH session creation)
     if [ -d "$SAVE_DIR/pam" ]; then
@@ -413,33 +419,21 @@ else
         fi
     fi
 fi
+echo "[fixup] END $(date '+%H:%M:%S') sudoers_exists=$(ls /etc/sudoers.d/${USERNAME} 2>&1) sudo_test=$(sudo -n -u ${USERNAME} true 2>&1 && echo OK || echo FAIL)" >> "$DBG"
 FIXUP_SCRIPT
 
 chmod +x /tmp/computile-ssh-fixup.sh
 
-# Rsync wrapper: runs fixup after each rsync within the same SSH session
-cat > /tmp/computile-rsync-wrapper.sh <<'WRAPPER_SCRIPT'
-#!/bin/bash
-rsync "$@"
-RC=$?
-# Restore safe root directory permissions — restic may store / as 0700 which
-# rsync -a propagates to the target, making ALL binaries inaccessible.
-chmod 755 / 2>/dev/null || true
-/tmp/computile-ssh-fixup.sh 2>/dev/null || true
-exit $RC
-WRAPPER_SCRIPT
-chmod +x /tmp/computile-rsync-wrapper.sh
 FIXUP_DEPLOY_EOF
         log_warn "  Could not deploy SSH fixup script"
         return 1
     }
-    log_info "  SSH fixup + rsync wrapper deployed on target"
+    log_info "  SSH fixup script deployed on target"
 }
 
-# Remove the SSH fixup script, rsync wrapper, and saved identity (called during cleanup)
 _cleanup_ssh_fixup() {
     _ssh_target "sudo bash -c '
-        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-rsync-wrapper.sh /tmp/computile-ssh-save /tmp/computile-restore-staging /tmp/computile-restore-current-path
+        rm -rf /tmp/computile-ssh-fixup.sh /tmp/computile-ssh-save /tmp/computile-restore-staging /tmp/computile-restore-current-path
         rm -f /etc/ssh/sshd_config.d/99-computile-restore.conf
         rm -f /etc/ssh/authorized_keys/${SSH_USER:-computile-restore}
         rmdir /etc/ssh/authorized_keys 2>/dev/null
@@ -1202,7 +1196,6 @@ Optional:
   --ssh-port PORT        SSH port on target (default: 22)
   --skip-db-restore      Skip database restoration phase
   --skip-cleanup         Do not clean up temp files
-  --no-streaming         Force extract+rsync mode (disable streaming)
   --start-from-phase N   Skip phases before N (2=skip restore, 3=skip restore+platform, etc.)
   --report-dir DIR       Report output directory (default: /var/log/computile-backup/)
   --dry-run              Show what would be done without executing
@@ -1210,7 +1203,7 @@ Optional:
 
 Phases:
   1  Pre-flight checks (always runs)
-  2  File restore (streaming or extract+rsync)
+  2  File restore (streaming: restic dump → ssh → tar)
   3  Platform (Coolify install, SSH keys, APP_KEY)
   4  Database restore
   5  Verification
@@ -1243,7 +1236,6 @@ parse_args() {
             --ssh-port)     SSH_PORT="$2"; shift 2 ;;
             --skip-db-restore) SKIP_DB_RESTORE=true; shift ;;
             --skip-cleanup) SKIP_CLEANUP=true; shift ;;
-            --no-streaming) NO_STREAMING=true; shift ;;
             --start-from-phase) START_FROM_PHASE="$2"; shift 2 ;;
             --report-dir)   REPORT_DIR="$2"; shift 2 ;;
             --dry-run)      DRY_RUN=true; shift ;;
@@ -1282,16 +1274,6 @@ phase0_select() {
         # Show SSH key and ask user to confirm it's on the target
         _tui_ssh_key_check || exit 1
 
-        # Options
-        local mode
-        mode=$($DIALOG --title "Restore Test — Transfer Mode" \
-            --menu "Choose the file transfer mode:" 14 $WT_WIDTH 3 \
-            "streaming"    "Streaming (restic dump | ssh tar) — fast, no local writes" \
-            "no-streaming" "Extract+rsync — slower, writes to gateway disk" \
-            3>&1 1>&2 2>&3) || exit 1
-        if [[ "$mode" == "no-streaming" ]]; then
-            NO_STREAMING=true
-        fi
     fi
 
     # Validate required parameters
@@ -1500,167 +1482,8 @@ phase1_preflight() {
     fi
 }
 
-# Restore a single path from restic and rsync to target.
-# On OOM (exit 137), recursively splits into sub-directories (max depth 4).
-# Args: path label depth
-#   label: display label like "[1/7]"
-#   depth: current split depth (0 = top-level)
-_restore_and_sync_path() {
-    local path="$1"
-    local label="$2"
-    local depth="${3:-0}"
-    local indent=""
-    for ((i=0; i<depth; i++)); do indent+="  "; done
 
-    # Try streaming mode first (no local disk writes)
-    if [[ "$USE_STREAMING" == true && $depth -eq 0 ]]; then
-        if _stream_path_to_target "$path" "$label"; then
-            return 0
-        fi
-        log_warn "${indent}Streaming failed for $path, falling back to extract+rsync..."
-    fi
 
-    log_info "${indent}${label} Restoring $path (extract+rsync)..."
-
-    # Clean temp dir
-    rm -rf "${TEMP_RESTORE_DIR:?}/"*
-
-    # Run restic in background with a progress monitor
-    local restic_log="${TEMP_RESTORE_DIR}.restic.log"
-    local restic_start_time
-    restic_start_time=$(date +%s)
-    restic restore --no-lock "$SNAPSHOT_ID" \
-        --target "$TEMP_RESTORE_DIR" --include "$path" \
-        >"$restic_log" 2>&1 &
-    local restic_pid=$!
-
-    # Progress monitor: show extracted size + percentage + elapsed every 5 seconds
-    local last_size=""
-    while kill -0 "$restic_pid" 2>/dev/null; do
-        sleep 5
-        if [[ -d "$TEMP_RESTORE_DIR" ]]; then
-            local cur_bytes cur_human pct_str="" elapsed_str
-            cur_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-            cur_human=$(du -sh "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-            local now_ts
-            now_ts=$(date +%s)
-            elapsed_str=$(_format_duration $((now_ts - restic_start_time)))
-            if [[ -n "$cur_human" && "$cur_human" != "$last_size" ]]; then
-                if [[ $SNAPSHOT_TOTAL_BYTES -gt 0 && "${cur_bytes:-0}" =~ ^[0-9]+$ ]]; then
-                    local pct=$(( (cur_bytes + total_restored_bytes) * 100 / SNAPSHOT_TOTAL_BYTES ))
-                    [[ $pct -gt 100 ]] && pct=100
-                    pct_str=" (${pct}% of total,"
-                fi
-                if [[ -n "$pct_str" ]]; then
-                    log_info "${indent}    progress: ${cur_human} extracted${pct_str} ${elapsed_str} elapsed)"
-                else
-                    log_info "${indent}    progress: ${cur_human} extracted (${elapsed_str} elapsed)"
-                fi
-                last_size="$cur_human"
-            fi
-        fi
-    done
-
-    local restic_rc=0
-    wait "$restic_pid" || restic_rc=$?
-    local restic_output
-    restic_output=$(cat "$restic_log" 2>/dev/null) || true
-    rm -f "$restic_log"
-
-    # OOM (137) → split into sub-directories and retry recursively
-    if [[ $restic_rc -eq 137 ]]; then
-        if [[ $depth -ge 4 ]]; then
-            log_error "${indent}  OOM on $path at depth $depth — cannot split further"
-            report_ko "Restic restore $path: OOM at depth $depth (not enough RAM)"
-            failed_paths+=("$path")
-            return
-        fi
-
-        log_warn "${indent}  OOM (exit 137) on $path — splitting into sub-directories (depth $((depth+1)))..."
-        rm -rf "${TEMP_RESTORE_DIR:?}/"*
-
-        local -a subdirs=()
-        local subdir
-        while IFS= read -r subdir; do
-            [[ -n "$subdir" ]] && subdirs+=("$subdir")
-        done < <(restic ls --no-lock "$SNAPSHOT_ID" "$path" 2>/dev/null \
-            | grep -E "^${path}/[^/]+$" | sort -u | head -100)
-
-        if [[ ${#subdirs[@]} -eq 0 ]]; then
-            log_error "${indent}  Could not list sub-directories of $path"
-            report_ko "Restic restore $path: OOM and no sub-directories found"
-            failed_paths+=("$path")
-            return
-        fi
-
-        log_info "${indent}  Found ${#subdirs[@]} sub-directories"
-        local sub_idx=0
-        for subdir in "${subdirs[@]}"; do
-            sub_idx=$((sub_idx + 1))
-            _restore_and_sync_path "$subdir" "${label} sub ${sub_idx}/${#subdirs[@]}:" $((depth + 1))
-        done
-        log_info "${indent}  $path done (via sub-directories)"
-        return
-    fi
-
-    # Other restic errors
-    if [[ $restic_rc -ne 0 ]]; then
-        log_error "${indent}  Restic restore failed for $path (exit code: $restic_rc)"
-        log_error "${indent}  Output: ${restic_output}"
-        report_ko "Restic restore $path: exit $restic_rc — ${restic_output}"
-        failed_paths+=("$path")
-        return
-    fi
-
-    # Restic applies the snapshot root's metadata (permissions/owner) to the
-    # target dir ($TEMP_RESTORE_DIR).  If the backup's / was e.g. 0700, rsync -a
-    # would propagate that to / on the target — catastrophic for non-root users.
-    chmod 755 "$TEMP_RESTORE_DIR"
-
-    # Calculate size
-    local path_bytes
-    path_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-    total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
-    log_info "${indent}  Extracted: $(_human_size "${path_bytes:-0}")"
-
-    # Rsync to target with progress
-    # The rsync wrapper on the target runs the SSH fixup after each rsync,
-    # re-injecting the restore user + host keys within the same SSH session.
-    local path_human
-    path_human=$(_human_size "${path_bytes:-0}")
-    log_info "${indent}  Syncing $path to target (${path_human})..."
-    local rsync_log="${TEMP_RESTORE_DIR}.rsync.log"
-    local rsync_rc=0
-    rsync "${rsync_opts[@]}" --info=progress2 \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" \
-        > >(tee "$rsync_log") 2>&1 || rsync_rc=$?
-    local rsync_output
-    rsync_output=$(cat "$rsync_log" 2>/dev/null) || true
-    rm -f "$rsync_log"
-
-    if [[ $rsync_rc -ne 0 ]]; then
-        log_error "${indent}  Rsync failed for $path (exit code: $rsync_rc)"
-        log_error "${indent}  Output: ${rsync_output}"
-        report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
-        failed_paths+=("$path")
-        return
-    fi
-
-    # Check target disk space after rsync (skip if SSH is broken — avoids false "0 GB" warning)
-    if _ssh_target true 2>/dev/null; then
-        local target_avail_kb
-        target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "")
-        if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
-            local target_avail_gb=$((target_avail_kb / 1048576))
-            if [[ $target_avail_gb -lt 2 ]]; then
-                log_warn "${indent}  Target disk space critically low: ${target_avail_gb} GB remaining"
-                report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
-            fi
-        fi
-    fi
-
-    log_info "${indent}  $path done"
-}
 
 # ──────────────────────────────────────────────
 # Phase 2: Restore files
@@ -1669,34 +1492,22 @@ phase2_restore_files() {
     log_section "PHASE 2: File Restore"
     report_phase "2" "FILE RESTORE"
 
-    # Create temp directory on gateway — use /var/tmp (on disk) instead of /tmp (often tmpfs = RAM)
-    TEMP_RESTORE_DIR=$(mktemp -d /var/tmp/computile-restore-test-XXXXXX) || die "Failed to create temp directory"
-    log_info "Temp restore directory: $TEMP_RESTORE_DIR"
-
     if $DRY_RUN; then
-        report_ok "Restic restore to $TEMP_RESTORE_DIR (dry-run)"
-        report_ok "Rsync to target (dry-run)"
+        report_ok "Streaming restore to target (dry-run)"
         return 0
     fi
 
-    # Detect streaming support (restic dump --archive tar, available since restic 0.10)
-    log_info "Checking streaming support..."
-    if $NO_STREAMING; then
-        log_info "  Streaming disabled (--no-streaming), using extract+rsync"
-    else
-        local restic_ver
-        restic_ver=$(restic version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || true)
-        local restic_major restic_minor
-        restic_major=$(echo "$restic_ver" | cut -d. -f1)
-        restic_minor=$(echo "$restic_ver" | cut -d. -f2)
-        if [[ "${restic_major:-0}" -gt 0 || "${restic_minor:-0}" -ge 10 ]]; then
-            USE_STREAMING=true
-            log_info "  Streaming mode enabled (restic dump → ssh → tar, no local disk writes)"
-            log_info "  This reduces gateway IO by ~50% (read-only, no temp file writes)"
-        else
-            log_info "  Streaming not available (restic ${restic_ver:-unknown} < 0.10), using extract+rsync"
-        fi
+    # Verify restic dump support (--archive tar, available since restic 0.10)
+    log_info "Verifying restic streaming support..."
+    local restic_ver
+    restic_ver=$(restic version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || true)
+    local restic_major restic_minor
+    restic_major=$(echo "$restic_ver" | cut -d. -f1)
+    restic_minor=$(echo "$restic_ver" | cut -d. -f2)
+    if [[ "${restic_major:-0}" -eq 0 && "${restic_minor:-0}" -lt 10 ]]; then
+        die "restic ${restic_ver:-unknown} does not support streaming (dump --archive tar). Requires >= 0.10."
     fi
+    log_info "  Streaming mode: restic dump → ssh → tar (no local disk writes)"
 
     # Install prerequisites on target first (use sudo if not root)
     log_info "Installing prerequisites on target..."
@@ -1795,28 +1606,25 @@ SAVE_EOF
         log_warn "  Could not save SSH user identity — SSH may break after /etc restore"
     fi
 
-    # ── Streaming: try single full dump first (avoids ~15s overhead per path) ──
-    if [[ "$USE_STREAMING" == true ]]; then
-        log_info "Attempting single full-snapshot dump (eliminates per-path tree-walk overhead)..."
-        if _stream_full_to_target; then
-            # Success — skip per-path logic entirely
-            local restore_end
-            restore_end=$(date +%s)
-            local restore_duration=$((restore_end - restore_start))
-            local total_human
-            total_human=$(_human_size "$total_restored_bytes")
-            local avg_speed="N/A"
-            if [[ $restore_duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
-                avg_speed="$(_human_size $(( total_restored_bytes / restore_duration )))/s"
-            fi
-            log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
-            report_ok "Restore complete (streaming, single dump): ~${total_human} in $(_format_duration $restore_duration) (avg ${avg_speed})"
-            return 0
+    # ── Try single full dump first (avoids ~15s overhead per path) ──
+    log_info "Attempting single full-snapshot streaming dump..."
+    if _stream_full_to_target; then
+        local restore_end
+        restore_end=$(date +%s)
+        local restore_duration=$((restore_end - restore_start))
+        local total_human
+        total_human=$(_human_size "$total_restored_bytes")
+        local avg_speed="N/A"
+        if [[ $restore_duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
+            avg_speed="$(_human_size $(( total_restored_bytes / restore_duration )))/s"
         fi
-        log_warn "Single full dump failed — falling back to per-path streaming..."
+        log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
+        report_ok "Restore complete (streaming, single dump): ~${total_human} in $(_format_duration $restore_duration) (avg ${avg_speed})"
+        return 0
     fi
+    log_warn "Single full dump failed — falling back to per-path streaming..."
 
-    # ── Per-path fallback (streaming per-path or extract+rsync) ──
+    # ── Per-path streaming fallback ──
 
     # Get the list of paths in the snapshot
     log_info "Listing paths in snapshot '$SNAPSHOT_ID'..."
@@ -1896,38 +1704,20 @@ SAVE_EOF
     paths=("${sorted_paths[@]}")
     log_info "Restore order: ${paths[*]}"
 
-    # Build rsync command with the wrapper that runs the SSH fixup after each rsync.
-    # The wrapper is a simple script on the target — no tokenization issues.
-    local rsync_rsh
-    rsync_rsh=$(_rsync_ssh_cmd)
-    local -a rsync_opts=(-az -e "$rsync_rsh")
-    if $fixup_ok; then
-        rsync_opts+=(--rsync-path="sudo /tmp/computile-rsync-wrapper.sh")
-    elif [[ "$SSH_USER" != "root" ]]; then
-        rsync_opts+=(--rsync-path="sudo rsync")
-    fi
-    # Only exclude Coolify SSH keys — they are handled in Phase 3
-    rsync_opts+=(
-        --exclude='data/coolify/ssh/keys/'
-        --exclude='data/coolify/ssh/id.*'
-    )
-
-    # Restore and rsync each path individually to limit RAM usage
+    # Stream each path individually
     local path_idx=0
     local failed_paths=()
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
 
-        # Tell the target which path is being restored so the fixup script
-        # can decide which system files to repair (path-aware fixup).
         _set_restore_path "$path"
 
-        _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0
+        if ! _stream_path_to_target "$path" "[$path_idx/$total_paths]"; then
+            failed_paths+=("$path")
+        fi
 
-        # After each rsync, check if SSH is still alive and re-establish if needed.
-        # The rsync wrapper runs the fixup inline (re-injects user + restores host keys),
-        # but sshd restart may kill the ControlMaster. Re-establish before next path.
+        # After each stream, check if SSH is still alive and re-establish if needed.
         if ! _ssh_target true 2>/dev/null; then
             log_info "SSH broken after $path — re-establishing connection..."
             _cleanup_ssh_control
@@ -1943,24 +1733,11 @@ SAVE_EOF
                     _setup_ssh_control
                     if _ssh_target true 2>/dev/null; then
                         ssh_ok=true
-                        # Rebuild rsync command with new ControlMaster socket
-                        rsync_rsh=$(_rsync_ssh_cmd)
-                        rsync_opts=(-az -e "$rsync_rsh")
-                        if $fixup_ok; then
-                            rsync_opts+=(--rsync-path="sudo /tmp/computile-rsync-wrapper.sh")
-                        elif [[ "$SSH_USER" != "root" ]]; then
-                            rsync_opts+=(--rsync-path="sudo rsync")
-                        fi
-                        rsync_opts+=(
-                            --exclude='data/coolify/ssh/keys/'
-                            --exclude='data/coolify/ssh/id.*'
-                        )
                         log_info "SSH re-established after $path (attempt $attempt)"
                         break
                     fi
                     _cleanup_ssh_control
                 fi
-                # Progressive backoff: 3, 4, 5, 6... up to 10s
                 [[ $wait_secs -lt 10 ]] && wait_secs=$((wait_secs + 1))
             done
             if ! $ssh_ok; then
@@ -1970,16 +1747,12 @@ SAVE_EOF
         fi
     done
 
-    # Cleanup temp dir
-    rm -rf "${TEMP_RESTORE_DIR:?}/"*
-
     local restore_end
     restore_end=$(date +%s)
     local restore_duration=$((restore_end - restore_start))
     local total_human
     total_human=$(_human_size "$total_restored_bytes")
 
-    # Phase 2 summary
     local avg_speed="N/A"
     if [[ $restore_duration -gt 0 && $total_restored_bytes -gt 0 ]]; then
         local bytes_per_sec=$((total_restored_bytes / restore_duration))
@@ -1987,11 +1760,8 @@ SAVE_EOF
     fi
     log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
 
-    local mode_str="extract+rsync"
-    [[ "$USE_STREAMING" == true ]] && mode_str="streaming"
-
     if [[ ${#failed_paths[@]} -eq 0 ]]; then
-        report_ok "Restore complete (${mode_str}): ~${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s), avg ${avg_speed})"
+        report_ok "Restore complete (streaming): ~${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s), avg ${avg_speed})"
     else
         report_ko "Restore completed with ${#failed_paths[@]} failure(s): ${failed_paths[*]}"
         return 1
@@ -2565,17 +2335,8 @@ _verify_applications() {
 phase6_cleanup() {
     log_section "PHASE 6: Cleanup"
 
-    # Remove SSH fixup script, rsync wrapper, and saved identity from target
+    # Remove SSH fixup script and saved identity from target
     _cleanup_ssh_fixup
-
-    if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" ]]; then
-        if $SKIP_CLEANUP; then
-            log_info "Temp directory preserved: $TEMP_RESTORE_DIR"
-        else
-            log_info "Cleaning up temp directory: $TEMP_RESTORE_DIR"
-            rm -rf "$TEMP_RESTORE_DIR"
-        fi
-    fi
 
     # In interactive mode, offer to clean up the target
     if [[ "$INTERACTIVE" == true && "$DRY_RUN" != true ]]; then
@@ -2600,12 +2361,6 @@ cleanup_on_exit() {
             report_ko "Test interrupted (signal/error, exit code: $exit_code)"
             report_generate
         fi
-    fi
-
-    # Always clean up temp dir on gateway (unless --skip-cleanup)
-    if [[ -n "$TEMP_RESTORE_DIR" && -d "$TEMP_RESTORE_DIR" && "$SKIP_CLEANUP" != true ]]; then
-        log_info "Cleaning up temp directory: $TEMP_RESTORE_DIR"
-        rm -rf "$TEMP_RESTORE_DIR"
     fi
 
     # Close SSH ControlMaster
