@@ -1367,6 +1367,29 @@ phase1_preflight() {
         die "Cannot connect to target VM. Aborting."
     fi
 
+    # Ensure passwordless sudo for SSH_USER (required for all restore operations)
+    if ! $DRY_RUN && [[ "$SSH_USER" != "root" ]]; then
+        log_info "Checking passwordless sudo for ${SSH_USER}..."
+        if _ssh_target "sudo -n true" &>/dev/null; then
+            report_ok "Passwordless sudo for ${SSH_USER}"
+        else
+            log_info "  Configuring passwordless sudo for ${SSH_USER}..."
+            # Try to set up NOPASSWD via the existing SSH session (user may have
+            # password-based sudo or be in a group with partial sudo access)
+            if _ssh_target "echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER} >/dev/null && sudo chmod 440 /etc/sudoers.d/${SSH_USER}" &>/dev/null; then
+                if _ssh_target "sudo -n true" &>/dev/null; then
+                    report_ok "Passwordless sudo configured for ${SSH_USER}"
+                else
+                    report_ko "Passwordless sudo for ${SSH_USER}"
+                    die "Cannot configure passwordless sudo. Set it up manually:\n  echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
+                fi
+            else
+                report_ko "Passwordless sudo for ${SSH_USER}"
+                die "Cannot configure passwordless sudo. Set it up manually:\n  echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
+            fi
+        fi
+    fi
+
     # Check target OS
     if ! $DRY_RUN; then
         local os_info
