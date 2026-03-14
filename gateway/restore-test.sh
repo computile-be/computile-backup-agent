@@ -412,15 +412,79 @@ _tui_ssh_key_check() {
         fi
     fi
 
-    local msg="Before connecting, you must add this gateway's SSH public key\n"
-    msg+="to the target VM (${SSH_USER}@${TARGET}).\n\n"
-    msg+="Key (${key_file}):\n\n"
-    msg+="${pub_key}\n\n"
-    msg+="On the target VM, run:\n"
-    msg+="  mkdir -p ~/.ssh && echo '${pub_key}' >> ~/.ssh/authorized_keys\n\n"
-    msg+="Have you added this key to the target VM?"
+    # Check if key is already authorized on target
+    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
+        -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+        return 0  # Already authorized
+    fi
 
-    if ! _yesno "Restore Test — SSH Key Setup" "$msg"; then
+    # Offer to push key automatically via password
+    local choice
+    choice=$($DIALOG --title "Restore Test — SSH Key Setup" \
+        --menu "SSH key not yet authorized on ${SSH_USER}@${TARGET}.\n\nHow do you want to set it up?" \
+        $WT_HEIGHT $WT_WIDTH $WT_LIST_HEIGHT \
+        "password"  "Enter password to copy key automatically" \
+        "manual"    "I'll add the key manually" \
+        3>&1 1>&2 2>&3) || return 1
+
+    case "$choice" in
+        password)
+            _push_ssh_key_via_password "$key_file"
+            ;;
+        manual)
+            local msg="Add this public key to ${SSH_USER}@${TARGET}:\n\n"
+            msg+="${pub_key}\n\n"
+            msg+="On the target VM, run:\n"
+            msg+="  mkdir -p ~/.ssh && echo '${pub_key}' >> ~/.ssh/authorized_keys\n\n"
+            msg+="Have you added this key?"
+
+            if ! _yesno "Restore Test — Manual Key Setup" "$msg"; then
+                return 1
+            fi
+            # Verify it works now
+            if ! ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes \
+                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+                _msg_box "Restore Test" "SSH connection still failing. Check the key and try again."
+                return 1
+            fi
+            ;;
+    esac
+}
+
+_push_ssh_key_via_password() {
+    local key_file="$1"
+
+    # Check if sshpass is available, install if needed
+    if ! command -v sshpass &>/dev/null; then
+        _msg_box "Installing sshpass" "Installing sshpass for password-based key copy..."
+        if ! apt-get install -y -qq sshpass &>/dev/null; then
+            _msg_box "Restore Test" "Failed to install sshpass.\nInstall manually: apt install sshpass"
+            return 1
+        fi
+    fi
+
+    local password
+    password=$($DIALOG --title "Restore Test — SSH Password" \
+        --passwordbox "Enter SSH password for ${SSH_USER}@${TARGET}:" \
+        10 $WT_WIDTH \
+        3>&1 1>&2 2>&3) || return 1
+
+    if [[ -z "$password" ]]; then
+        _msg_box "Restore Test" "No password entered."
+        return 1
+    fi
+
+    # Push key using ssh-copy-id
+    local output
+    if output=$(sshpass -p "$password" ssh-copy-id \
+        -o StrictHostKeyChecking=accept-new \
+        -p "$SSH_PORT" \
+        -i "$key_file" \
+        "${SSH_USER}@${TARGET}" 2>&1); then
+        _msg_box "Restore Test" "SSH key copied successfully to ${SSH_USER}@${TARGET}."
+        return 0
+    else
+        _msg_box "Restore Test — Error" "Failed to copy SSH key:\n\n${output}\n\nCheck the password and try again."
         return 1
     fi
 }
