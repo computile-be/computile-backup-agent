@@ -232,9 +232,11 @@ _cleanup_ssh_control() {
 }
 
 _ssh_target() {
+    # -tt forces pseudo-TTY allocation even when stdin is not a terminal.
+    # Required for sudo on targets with Defaults use_pty (Debian 13+).
     # shellcheck disable=SC2046
     ssh $(_ssh_common_opts) \
-        -o BatchMode=yes \
+        -tt -o BatchMode=yes \
         "${SSH_USER}@${TARGET}" "$@"
 }
 
