@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.30.1] - 2026-03-14
+
+### Changed
+- **Restore test**: stage sensitive files (`/etc`) to a temp dir on target during extract+rsync, apply them at the very end via SSH — SSH connection is never broken because `/etc` is never directly overwritten during rsync
+- **Restore test**: after all rsyncs complete, apply staged `/etc` + run SSH fixup in a single controlled SSH session through ControlMaster (guaranteed alive since `/etc` was never touched)
+
 ## [1.30.0] - 2026-03-14
 
 ### Changed

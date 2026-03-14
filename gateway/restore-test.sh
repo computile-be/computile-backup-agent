@@ -1414,13 +1414,25 @@ _restore_and_sync_path() {
     log_info "${indent}  Extracted: $(_human_size "${path_bytes:-0}")"
 
     # Rsync to target with progress
+    # Sensitive paths (/etc) go to a staging dir — applied later to avoid breaking SSH
+    local rsync_dest="/"
+    local is_staged=false
+    if [[ "$path" == "/etc" || "$path" == "/etc/"* ]]; then
+        rsync_dest="/tmp/computile-restore-staging/"
+        is_staged=true
+    fi
+
     local path_human
     path_human=$(_human_size "${path_bytes:-0}")
-    log_info "${indent}  Syncing $path to target (${path_human})..."
+    if $is_staged; then
+        log_info "${indent}  Syncing $path to staging dir on target (${path_human})..."
+    else
+        log_info "${indent}  Syncing $path to target (${path_human})..."
+    fi
     local rsync_log="${TEMP_RESTORE_DIR}.rsync.log"
     local rsync_rc=0
     rsync "${rsync_opts[@]}" --info=progress2 \
-        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" \
+        "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:${rsync_dest}" \
         > >(tee "$rsync_log") 2>&1 || rsync_rc=$?
     local rsync_output
     rsync_output=$(cat "$rsync_log" 2>/dev/null) || true
@@ -1429,54 +1441,13 @@ _restore_and_sync_path() {
     if [[ $rsync_rc -ne 0 ]]; then
         log_error "${indent}  Rsync failed for $path (exit code: $rsync_rc)"
         log_error "${indent}  Output: ${rsync_output}"
-        # Check if this is an SSH auth failure — likely SSH keys were overwritten
-        if echo "$rsync_output" | grep -qi "permission denied\|publickey\|authentication"; then
-            log_error "${indent}  SSH authentication lost — restored files may have overwritten SSH keys on target"
-            log_error "${indent}  Try: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
-            report_ko "Rsync $path: SSH auth lost — target SSH keys likely overwritten by restore"
-        else
-            report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
-        fi
+        report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
         failed_paths+=("$path")
         return
     fi
 
-    # Verify SSH connectivity is still working after rsync.
-    # The inline fixup (via --rsync-path wrapper) should have already re-injected the
-    # SSH user + host keys within the same session. But the ControlMaster may be stale
-    # after host key changes, so we need to re-establish it.
-    if ! _ssh_target true 2>/dev/null; then
-        log_info "${indent}  Re-establishing SSH after rsync of $path (fixup ran inline)..."
-        _cleanup_ssh_control
-        # Clear known_hosts — host keys were restored by the fixup but may have
-        # transiently changed during rsync, leaving a stale entry
-        ssh-keygen -R "$TARGET" 2>/dev/null || true
-        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
-        # Brief wait for sshd restart (triggered by the fixup) to complete
-        local ssh_ok=false
-        for attempt in 1 2 3 4 5; do
-            sleep 2
-            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=5 -o BatchMode=yes \
-                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
-                _setup_ssh_control
-                if _ssh_target true 2>/dev/null; then
-                    ssh_ok=true
-                    break
-                fi
-                _cleanup_ssh_control
-            fi
-        done
-
-        if ! $ssh_ok; then
-            log_error "${indent}  SSH connectivity lost after rsync of $path"
-            log_error "${indent}  Fixup script may have failed. Try: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
-            report_ko "SSH connectivity lost after rsync of $path"
-            failed_paths+=("$path")
-            report_ko "Remaining paths skipped — SSH connection broken"
-            return 1
-        fi
-        log_info "${indent}  SSH recovered after rsync of $path"
+    if $is_staged; then
+        log_info "${indent}  $path staged (will be applied after all other paths)"
     fi
 
     # Check target disk space after rsync
@@ -1535,7 +1506,7 @@ phase2_restore_files() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo"
     local prereqs="gzip curl"
     [[ "$USE_STREAMING" != true ]] && prereqs+=" rsync"
-    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs}" &>/dev/null; then
+    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs} && ${_sudo} mkdir -p /tmp/computile-restore-staging" &>/dev/null; then
         report_ok "Target prerequisites installed"
     else
         report_warn "Could not install prerequisites (may already be present)"
@@ -1693,25 +1664,16 @@ SAVE_EOF
     paths=("${sorted_paths[@]}")
     log_info "Restore order: ${paths[*]}"
 
-    # Build rsync command with inline SSH fixup via --rsync-path wrapper.
-    # After rsync completes, the fixup script re-injects the SSH user + host keys
-    # within the SAME SSH session — no polling, no timing issues.
+    # Build rsync command
     local rsync_rsh
     rsync_rsh=$(_rsync_ssh_cmd)
     local -a rsync_opts=(-az -e "$rsync_rsh")
+    [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
     # Only exclude Coolify SSH keys — they are handled in Phase 3
     rsync_opts+=(
         --exclude='data/coolify/ssh/keys/'
         --exclude='data/coolify/ssh/id.*'
     )
-    # Wrap remote rsync to run the SSH fixup script after each sync.
-    # The fixup re-injects the SSH user, authorized_keys, host keys, and restarts sshd.
-    # This runs in the SAME SSH session as rsync, before the connection closes.
-    if [[ "$SSH_USER" != "root" ]]; then
-        rsync_opts+=(--rsync-path="sudo bash -c 'rsync \"\$@\"; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC' --")
-    else
-        rsync_opts+=(--rsync-path="bash -c 'rsync \"\$@\"; RC=\$?; /tmp/computile-ssh-fixup.sh 2>/dev/null || true; exit \$RC' --")
-    fi
 
     # Restore and rsync each path individually to limit RAM usage
     local path_idx=0
@@ -1725,6 +1687,57 @@ SAVE_EOF
             break
         fi
     done
+
+    # Apply staged sensitive files (/etc) and run SSH fixup.
+    # The ControlMaster is guaranteed alive because we never rsynced directly to /etc.
+    if [[ ${#failed_paths[@]} -eq 0 ]] && $fixup_ok; then
+        log_info "Applying staged /etc files on target + SSH fixup..."
+        local _sudo_apply=""
+        [[ "$SSH_USER" != "root" ]] && _sudo_apply="sudo "
+        if _ssh_target "${_sudo_apply}bash -s" <<'APPLY_EOF' 2>/dev/null; then
+STAGING="/tmp/computile-restore-staging"
+if [ -d "$STAGING" ] && [ "$(ls -A "$STAGING" 2>/dev/null)" ]; then
+    # Apply staged files to real filesystem
+    rsync -a "$STAGING/" / 2>/dev/null || cp -a "$STAGING/." / 2>/dev/null || true
+    rm -rf "$STAGING"
+fi
+# Re-inject SSH user + host keys (idempotent)
+if [ -x /tmp/computile-ssh-fixup.sh ]; then
+    /tmp/computile-ssh-fixup.sh
+fi
+APPLY_EOF
+            log_info "  Staged files applied + SSH fixup complete"
+            # Re-establish ControlMaster after sshd restart
+            if ! _ssh_target true 2>/dev/null; then
+                _cleanup_ssh_control
+                ssh-keygen -R "$TARGET" 2>/dev/null || true
+                ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
+                local ssh_ok=false
+                for attempt in 1 2 3 4 5; do
+                    sleep 2
+                    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                        -o ConnectTimeout=5 -o BatchMode=yes \
+                        -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                        _setup_ssh_control
+                        if _ssh_target true 2>/dev/null; then
+                            ssh_ok=true
+                            break
+                        fi
+                        _cleanup_ssh_control
+                    fi
+                done
+                if ! $ssh_ok; then
+                    log_error "  SSH connectivity lost after applying staged files"
+                    report_ko "SSH lost after applying staged /etc"
+                    failed_paths+=("/etc (apply)")
+                fi
+            fi
+        else
+            log_error "  Failed to apply staged files"
+            report_ko "Failed to apply staged /etc files on target"
+            failed_paths+=("/etc (apply)")
+        fi
+    fi
 
     # Cleanup temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
