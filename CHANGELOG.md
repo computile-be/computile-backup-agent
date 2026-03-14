@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.1] - 2026-03-14
+
+### Fixed
+- **Restore test**: recursive OOM split — when a sub-directory also OOMs, it splits again (up to depth 4), so even `/data/coolify` with many large subdirs gets handled on 512 MB gateways
+
 ## [1.22.0] - 2026-03-14
 
 ### Fixed

@@ -841,24 +841,36 @@ phase1_preflight() {
 }
 
 # Restore a single path from restic and rsync to target.
-# On OOM (exit 137), splits into sub-directories and retries.
+# On OOM (exit 137), recursively splits into sub-directories (max depth 4).
+# Args: path label depth
+#   label: display label like "[1/7]"
+#   depth: current split depth (0 = top-level)
 _restore_and_sync_path() {
     local path="$1"
-    local path_idx="$2"
-    local total="$3"
+    local label="$2"
+    local depth="${3:-0}"
+    local indent=""
+    for ((i=0; i<depth; i++)); do indent+="  "; done
 
-    log_info "[$path_idx/$total] Restoring $path ..."
+    log_info "${indent}${label} Restoring $path ..."
 
-    # Clean temp dir before each path
+    # Clean temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
 
     local restic_output restic_rc=0
     restic_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
         --target "$TEMP_RESTORE_DIR" --include "$path" 2>&1) || restic_rc=$?
 
-    # OOM (137) → split into sub-directories and retry each one
+    # OOM (137) → split into sub-directories and retry recursively
     if [[ $restic_rc -eq 137 ]]; then
-        log_warn "  OOM (exit 137) on $path — splitting into sub-directories..."
+        if [[ $depth -ge 4 ]]; then
+            log_error "${indent}  OOM on $path at depth $depth — cannot split further"
+            report_ko "Restic restore $path: OOM at depth $depth (not enough RAM)"
+            failed_paths+=("$path")
+            return
+        fi
+
+        log_warn "${indent}  OOM (exit 137) on $path — splitting into sub-directories (depth $((depth+1)))..."
         rm -rf "${TEMP_RESTORE_DIR:?}/"*
 
         local -a subdirs=()
@@ -866,59 +878,29 @@ _restore_and_sync_path() {
         while IFS= read -r subdir; do
             [[ -n "$subdir" ]] && subdirs+=("$subdir")
         done < <(restic ls --no-lock "$SNAPSHOT_ID" "$path" 2>/dev/null \
-            | grep -E "^${path}/[^/]+$" | sort -u | head -50)
+            | grep -E "^${path}/[^/]+$" | sort -u | head -100)
 
         if [[ ${#subdirs[@]} -eq 0 ]]; then
-            log_error "  Could not list sub-directories of $path"
+            log_error "${indent}  Could not list sub-directories of $path"
             report_ko "Restic restore $path: OOM and no sub-directories found"
             failed_paths+=("$path")
             return
         fi
 
-        log_info "  Found ${#subdirs[@]} sub-directories, restoring individually..."
+        log_info "${indent}  Found ${#subdirs[@]} sub-directories"
         local sub_idx=0
         for subdir in "${subdirs[@]}"; do
             sub_idx=$((sub_idx + 1))
-            log_info "  [$path_idx/$total] Sub $sub_idx/${#subdirs[@]}: $subdir"
-
-            rm -rf "${TEMP_RESTORE_DIR:?}/"*
-
-            local sub_output sub_rc=0
-            sub_output=$(restic restore --no-lock "$SNAPSHOT_ID" \
-                --target "$TEMP_RESTORE_DIR" --include "$subdir" 2>&1) || sub_rc=$?
-
-            if [[ $sub_rc -ne 0 ]]; then
-                log_error "    Restic restore failed for $subdir (exit code: $sub_rc)"
-                report_ko "Restic restore $subdir: exit $sub_rc"
-                failed_paths+=("$subdir")
-                continue
-            fi
-
-            local sub_bytes
-            sub_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-            total_restored_bytes=$((total_restored_bytes + ${sub_bytes:-0}))
-            log_info "    Extracted: $(_human_size "${sub_bytes:-0}")"
-
-            log_info "    Syncing $subdir to target..."
-            local rsync_out rsync_rc=0
-            rsync_out=$(rsync "${rsync_opts[@]}" \
-                "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
-
-            if [[ $rsync_rc -ne 0 ]]; then
-                log_error "    Rsync failed for $subdir (exit code: $rsync_rc)"
-                report_ko "Rsync $subdir: exit $rsync_rc — ${rsync_out}"
-                failed_paths+=("$subdir")
-                continue
-            fi
+            _restore_and_sync_path "$subdir" "${label} sub ${sub_idx}/${#subdirs[@]}:" $((depth + 1))
         done
-        log_info "  $path done (via sub-directories)"
+        log_info "${indent}  $path done (via sub-directories)"
         return
     fi
 
     # Other restic errors
     if [[ $restic_rc -ne 0 ]]; then
-        log_error "  Restic restore failed for $path (exit code: $restic_rc)"
-        log_error "  Output: ${restic_output}"
+        log_error "${indent}  Restic restore failed for $path (exit code: $restic_rc)"
+        log_error "${indent}  Output: ${restic_output}"
         report_ko "Restic restore $path: exit $restic_rc — ${restic_output}"
         failed_paths+=("$path")
         return
@@ -928,23 +910,23 @@ _restore_and_sync_path() {
     local path_bytes
     path_bytes=$(du -sb "$TEMP_RESTORE_DIR" 2>/dev/null | awk '{print $1}')
     total_restored_bytes=$((total_restored_bytes + ${path_bytes:-0}))
-    log_info "  Extracted: $(_human_size "${path_bytes:-0}")"
+    log_info "${indent}  Extracted: $(_human_size "${path_bytes:-0}")"
 
     # Rsync to target
-    log_info "  Syncing $path to target..."
+    log_info "${indent}  Syncing $path to target..."
     local rsync_output rsync_rc=0
     rsync_output=$(rsync "${rsync_opts[@]}" \
         "${TEMP_RESTORE_DIR}/" "${SSH_USER}@${TARGET}:/" 2>&1) || rsync_rc=$?
 
     if [[ $rsync_rc -ne 0 ]]; then
-        log_error "  Rsync failed for $path (exit code: $rsync_rc)"
-        log_error "  Output: ${rsync_output}"
+        log_error "${indent}  Rsync failed for $path (exit code: $rsync_rc)"
+        log_error "${indent}  Output: ${rsync_output}"
         report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
         failed_paths+=("$path")
         return
     fi
 
-    log_info "  $path done"
+    log_info "${indent}  $path done"
 }
 
 # ──────────────────────────────────────────────
@@ -1045,7 +1027,7 @@ phase2_restore_files() {
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
-        _restore_and_sync_path "$path" "$path_idx" "$total_paths"
+        _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0
     done
 
     # Cleanup temp dir
