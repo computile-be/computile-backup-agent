@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.20.0] - 2026-03-14
+
+### Added
+- **Restore test**: Tailscale connectivity check (`tailscale ping`) before SSH key setup — detects ACL blocks, offline targets, or wrong hostnames early with clear error messages
+- **Restore test**: Tailscale check also in Phase 1 pre-flight for non-interactive mode
+
 ## [1.19.1] - 2026-03-14
 
 ### Fixed

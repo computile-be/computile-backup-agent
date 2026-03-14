@@ -379,6 +379,41 @@ _tui_input_target() {
     echo "$target"
 }
 
+_check_tailscale_connectivity() {
+    local target="$1"
+
+    # Check if tailscale is available
+    if ! command -v tailscale &>/dev/null; then
+        log_warn "tailscale command not found, skipping connectivity check"
+        return 0
+    fi
+
+    log_info "Checking Tailscale connectivity to ${target}..."
+    local ping_output
+    if ping_output=$(timeout 5 tailscale ping --c 1 "$target" 2>&1); then
+        log_info "  -> Tailscale connectivity OK"
+        return 0
+    else
+        log_error "  -> Tailscale connectivity FAILED"
+        log_error "  Output: ${ping_output}"
+
+        # If in TUI mode, show a dialog with details
+        if [[ -n "$DIALOG" ]]; then
+            local msg="Cannot reach ${target} via Tailscale.\n\n"
+            msg+="This could be:\n"
+            msg+="  - The target is offline\n"
+            msg+="  - Tailscale ACLs block access from this gateway\n"
+            msg+="  - The hostname/IP is incorrect\n\n"
+            if [[ -n "$ping_output" ]]; then
+                msg+="Details:\n${ping_output}\n\n"
+            fi
+            msg+="Check your Tailscale admin console for ACL rules."
+            _msg_box "Restore Test — Tailscale Error" "$msg"
+        fi
+        return 1
+    fi
+}
+
 _tui_input_ssh_user() {
     local user
     user=$($DIALOG --title "Restore Test — SSH User" \
@@ -649,6 +684,10 @@ phase0_select() {
 
         SNAPSHOT_ID=$(_tui_select_snapshot) || exit 1
         TARGET=$(_tui_input_target) || exit 1
+
+        # Verify Tailscale connectivity before going further
+        _check_tailscale_connectivity "$TARGET" || exit 1
+
         SSH_USER=$(_tui_input_ssh_user) || exit 1
 
         # Show SSH key and ask user to confirm it's on the target
@@ -720,6 +759,16 @@ _detect_role() {
 phase1_preflight() {
     log_section "PHASE 1: Pre-flight Checks"
     report_phase "1" "PRE-FLIGHT"
+
+    # Check Tailscale connectivity
+    if $DRY_RUN; then
+        report_ok "Tailscale connectivity (dry-run)"
+    elif _check_tailscale_connectivity "$TARGET"; then
+        report_ok "Tailscale connectivity to ${TARGET}"
+    else
+        report_ko "Tailscale connectivity to ${TARGET} — check ACLs or target status"
+        die "Cannot reach target via Tailscale. Aborting."
+    fi
 
     # Check SSH connectivity
     log_info "Testing SSH connectivity to ${TARGET}..."
