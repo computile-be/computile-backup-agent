@@ -4,6 +4,13 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.25.0] - 2026-03-14
+
+### Fixed
+- **Restore test**: fix duplicate report generation — `cleanup_on_exit` trap no longer generates a second report when a phase already generated one
+- **Restore test**: fix SSH connection breaking after rsync of `/data` — exclude Coolify SSH keys (`/data/coolify/ssh/keys/`, `/data/coolify/ssh/id.*`) from rsync to prevent overwriting target's SSH authentication
+- **Restore test**: detect SSH connectivity loss after each rsync and abort remaining paths with a clear error message instead of failing repeatedly
+
 ## [1.24.0] - 2026-03-14
 
 ### Improved

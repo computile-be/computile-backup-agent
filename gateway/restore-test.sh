@@ -189,6 +189,7 @@ report_generate() {
     ts_file=$(date '+%Y%m%d-%H%M%S')
     REPORT_FILE="${REPORT_DIR}/restore-test-${CLIENT}-${VPS}-${ts_file}.log"
     echo "$report" > "$REPORT_FILE"
+    REPORT_GENERATED=true
 
     echo ""
     echo "$report"
@@ -985,9 +986,28 @@ _restore_and_sync_path() {
     if [[ $rsync_rc -ne 0 ]]; then
         log_error "${indent}  Rsync failed for $path (exit code: $rsync_rc)"
         log_error "${indent}  Output: ${rsync_output}"
-        report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
+        # Check if this is an SSH auth failure — likely SSH keys were overwritten
+        if echo "$rsync_output" | grep -qi "permission denied\|publickey\|authentication"; then
+            log_error "${indent}  SSH authentication lost — restored files may have overwritten SSH keys on target"
+            log_error "${indent}  Try: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
+            report_ko "Rsync $path: SSH auth lost — target SSH keys likely overwritten by restore"
+        else
+            report_ko "Rsync $path: exit $rsync_rc — ${rsync_output}"
+        fi
         failed_paths+=("$path")
         return
+    fi
+
+    # Verify SSH connectivity is still working after rsync
+    if ! _ssh_target true 2>/dev/null; then
+        log_error "${indent}  SSH connectivity lost after rsync of $path"
+        log_error "${indent}  Restored files may have overwritten SSH keys on target"
+        log_error "${indent}  Try re-copying gateway SSH key: ssh-copy-id -p $SSH_PORT ${SSH_USER}@${TARGET}"
+        report_ko "SSH connectivity lost after rsync of $path"
+        failed_paths+=("$path")
+        # Abort remaining paths — no point continuing without SSH
+        report_ko "Remaining paths skipped — SSH connection broken"
+        return 1
     fi
 
     log_info "${indent}  $path done"
@@ -1094,10 +1114,13 @@ phase2_restore_files() {
     local -a rsync_opts=(-az -e "$rsync_rsh")
     [[ "$SSH_USER" != "root" ]] && rsync_opts+=(--rsync-path="sudo rsync")
     # Exclude SSH config to avoid breaking the active connection
+    # Also exclude Coolify SSH keys — they will be handled in Phase 3
     rsync_opts+=(
         --exclude='/etc/ssh/'
         --exclude='/home/*/.ssh/authorized_keys'
         --exclude='/root/.ssh/authorized_keys'
+        --exclude='/data/coolify/ssh/keys/'
+        --exclude='/data/coolify/ssh/id.*'
     )
 
     # Restore and rsync each path individually to limit RAM usage
@@ -1109,7 +1132,11 @@ phase2_restore_files() {
 
     for path in "${paths[@]}"; do
         path_idx=$((path_idx + 1))
-        _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0
+        # _restore_and_sync_path returns 1 if SSH is broken — abort remaining paths
+        if ! _restore_and_sync_path "$path" "[$path_idx/$total_paths]" 0; then
+            log_error "Aborting remaining paths due to SSH connectivity loss"
+            break
+        fi
     done
 
     # Cleanup temp dir
@@ -1722,12 +1749,13 @@ phase6_cleanup() {
 }
 
 INTERRUPTED=false
+REPORT_GENERATED=false
 
 cleanup_on_exit() {
     local exit_code=$?
 
-    # On interrupt (Ctrl+C), generate partial report
-    if [[ $INTERRUPTED == true || $exit_code -ne 0 ]]; then
+    # On interrupt (Ctrl+C), generate partial report — but only if not already generated
+    if [[ $INTERRUPTED == true && $REPORT_GENERATED == false ]]; then
         if [[ -n "$START_TIME" && -n "$CLIENT" ]]; then
             echo ""
             log_warn "Restore test interrupted (exit code: $exit_code)"
