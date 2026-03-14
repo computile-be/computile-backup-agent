@@ -250,6 +250,20 @@ EOF
 }
 
 # ──────────────────────────────────────────────
+# Ensure gateway SSH key exists (for restore test)
+# ──────────────────────────────────────────────
+ensure_gateway_ssh_key() {
+    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        info "Generating SSH key for restore operations..."
+        ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "computile-gateway-restore" >/dev/null 2>&1
+        info "SSH key generated: /root/.ssh/id_ed25519.pub"
+        info "This key is used by computile-restore-test to connect to target VMs."
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Install gateway scripts
 # ──────────────────────────────────────────────
 install_gateway_scripts() {
@@ -294,15 +308,8 @@ install_gateway_scripts() {
     # Record source repo path for future updates
     echo "${SCRIPT_DIR}/.." > "${INSTALL_LIB}/.source-repo"
 
-    # Generate SSH key for restore operations (if not already present)
-    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-        info "Generating SSH key for restore operations..."
-        ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "computile-gateway-restore" >/dev/null 2>&1
-        info "SSH key generated: /root/.ssh/id_ed25519.pub"
-        info "This key is used by computile-restore-test to connect to target VMs."
-    else
-        info "SSH key already exists: /root/.ssh/id_ed25519"
-    fi
+    # Generate SSH key for restore operations
+    ensure_gateway_ssh_key
 
     # Gateway config (don't overwrite existing)
     local gw_config="/etc/computile-backup/gateway.conf"
@@ -419,6 +426,8 @@ update_gateway() {
         info "Available version: v${new_version}"
 
         if [[ "$installed_version" == "$new_version" ]] && ! $FORCE_MODE; then
+            # Still ensure SSH key exists even if scripts are up to date
+            ensure_gateway_ssh_key
             info "Already up to date (v${installed_version})"
             return 0
         fi
