@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.11.2] - 2026-03-14
+
+### Changed
+- **Restore browser shows file metadata**: directory listing now displays modification date and size (human-readable) for each entry, and file detail view shows path, size, date, and permissions
+
 ## [1.11.1] - 2026-03-14
 
 ### Added

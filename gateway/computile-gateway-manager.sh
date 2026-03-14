@@ -2153,70 +2153,78 @@ _restore_select_snapshot() {
     echo "$choice"
 }
 
+_human_size() {
+    awk "BEGIN {
+        b=$1
+        if      (b >= 1073741824) printf \"%.1f GB\", b/1073741824
+        else if (b >= 1048576)    printf \"%.1f MB\", b/1048576
+        else if (b >= 1024)       printf \"%.1f KB\", b/1024
+        else                      printf \"%d B\", b
+    }"
+}
+
 _restore_browse() {
     local snapshot_id="$1"
     local current_dir="/"
 
-    # Cache the full file listing once (much faster than repeated restic ls calls)
+    # Cache the full file listing with metadata (--long gives perms, size, date, time, path)
     local cache_file
     cache_file=$(mktemp /tmp/restic-browse-XXXXXX) || return
     trap "rm -f '$cache_file'" RETURN
 
     $DIALOG --title "Browse" --infobox "Loading file list from snapshot ${snapshot_id}..." 5 $WT_WIDTH
-    restic ls --no-lock "$snapshot_id" 2>/dev/null > "$cache_file" || {
+    restic ls --long --no-lock "$snapshot_id" 2>/dev/null > "$cache_file" || {
         msg_box "Browse — Error" "Unable to list snapshot files."
         return
     }
 
     while true; do
-        # List immediate children of current_dir
-        local -a items=()
-        local -a dirs=()
-        local -a files=()
+        # Use awk to extract direct children of current_dir with metadata
+        # Output: name\ttype\tsize\tdate
+        local entries_file
+        entries_file=$(mktemp /tmp/restic-entries-XXXXXX) || return
 
-        while IFS= read -r entry; do
-            # Strip trailing slash for dirs
-            local clean="${entry%/}"
-            # Get parent dir
-            local parent="${clean%/*}"
-            [[ -z "$parent" ]] && parent="/"
-            # Must be direct child of current_dir
-            if [[ "$current_dir" == "/" ]]; then
-                # Direct children of / have exactly one slash at start and no other slashes
-                [[ "$clean" == /* ]] || continue
-                local rest="${clean#/}"
-                [[ "$rest" == */* ]] && continue
-                [[ -z "$rest" ]] && continue
-            else
-                [[ "$parent" == "$current_dir" ]] || continue
-            fi
+        awk -v dir="$current_dir" '
+        {
+            perms=$1; size=$2; date=$3
+            # Path is everything from field 5 onwards (field 4 is time)
+            path=""
+            for(i=5;i<=NF;i++) path=(path ? path " " : "") $i
 
-            local name="${clean##*/}"
-            # Check if it's a directory (has children in the listing)
-            local check_prefix
-            if [[ "$current_dir" == "/" ]]; then
-                check_prefix="/${name}/"
-            else
-                check_prefix="${current_dir}/${name}/"
-            fi
-            if grep -q "^${check_prefix}" "$cache_file" 2>/dev/null; then
-                dirs+=("$name")
-            else
-                files+=("$name")
-            fi
-        done < "$cache_file"
+            # Determine if direct child of dir
+            if (dir == "/") {
+                if (path !~ /^\/[^\/]+$/) next
+                name = substr(path, 2)
+            } else {
+                prefix = dir "/"
+                if (substr(path, 1, length(prefix)) != prefix) next
+                rest = substr(path, length(prefix) + 1)
+                if (rest == "" || index(rest, "/") > 0) next
+                name = rest
+            }
 
-        # Build menu items: ".." first (unless at /), then dirs, then files
+            type = (substr(perms,1,1) == "d") ? "dir" : "file"
+            printf "%s\t%s\t%s\t%s\n", name, type, size, date
+        }
+        ' "$cache_file" | sort -t$'\t' -k2,2r -k1,1 | uniq > "$entries_file"
+
+        # Build menu items
         local -a menu_items=()
         if [[ "$current_dir" != "/" ]]; then
-            menu_items+=(".." "Parent directory")
+            menu_items+=(".." ".. parent directory")
         fi
-        for d in $(printf '%s\n' "${dirs[@]+"${dirs[@]}"}" | sort); do
-            menu_items+=("${d}/" "directory")
-        done
-        for f in $(printf '%s\n' "${files[@]+"${files[@]}"}" | sort); do
-            menu_items+=("$f" "file")
-        done
+
+        while IFS=$'\t' read -r name type size date; do
+            [[ -z "$name" ]] && continue
+            if [[ "$type" == "dir" ]]; then
+                menu_items+=("${name}/" "${date}  <DIR>")
+            else
+                local hsize
+                hsize=$(_human_size "$size")
+                menu_items+=("$name" "${date}  ${hsize}")
+            fi
+        done < "$entries_file"
+        rm -f "$entries_file"
 
         if [[ ${#menu_items[@]} -eq 0 ]]; then
             msg_box "Browse" "No entries in ${current_dir}"
@@ -2230,14 +2238,12 @@ _restore_browse() {
             3>&1 1>&2 2>&3) || return
 
         if [[ "$choice" == ".." ]]; then
-            # Go up one level
             if [[ "$current_dir" == "/" ]]; then
                 continue
             fi
             current_dir="${current_dir%/*}"
             [[ -z "$current_dir" ]] && current_dir="/"
         elif [[ "$choice" == */ ]]; then
-            # Enter directory
             local dir_name="${choice%/}"
             if [[ "$current_dir" == "/" ]]; then
                 current_dir="/${dir_name}"
@@ -2245,7 +2251,7 @@ _restore_browse() {
                 current_dir="${current_dir}/${dir_name}"
             fi
         else
-            # File selected — show path and offer restore
+            # File selected — look up metadata
             local full_path
             if [[ "$current_dir" == "/" ]]; then
                 full_path="/${choice}"
@@ -2253,9 +2259,27 @@ _restore_browse() {
                 full_path="${current_dir}/${choice}"
             fi
 
+            # Extract file metadata from cache
+            local file_meta
+            file_meta=$(awk -v fp="$full_path" '{
+                path=""; for(i=5;i<=NF;i++) path=(path ? path " " : "") $i
+                if (path == fp) { printf "%s  %s %s  %s", $1, $3, $4, $2; exit }
+            }' "$cache_file")
+
+            local file_info="Path: ${full_path}"
+            if [[ -n "$file_meta" ]]; then
+                local f_perms f_date f_size_raw
+                f_perms=$(echo "$file_meta" | awk '{print $1}')
+                f_date=$(echo "$file_meta" | awk '{print $2, $3}')
+                f_size_raw=$(echo "$file_meta" | awk '{print $4}')
+                local f_hsize
+                f_hsize=$(_human_size "$f_size_raw")
+                file_info="Path: ${full_path}\nSize: ${f_hsize}\nDate: ${f_date}\nMode: ${f_perms}"
+            fi
+
             local file_action
             file_action=$($DIALOG --title "File — ${choice}" \
-                --menu "Path: ${full_path}" $WT_HEIGHT $WT_WIDTH 3 \
+                --menu "$file_info" $WT_HEIGHT $WT_WIDTH 3 \
                 "restore" "Restore this file" \
                 "copy"    "Copy path to clipboard" \
                 "back"    "Go back" \
