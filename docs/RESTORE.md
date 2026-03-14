@@ -354,6 +354,67 @@ curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
 
 ---
 
+## 9. Test automatisé de restore
+
+L'outil `computile-restore-test` permet de valider qu'un backup est fonctionnel en orchestrant un restore complet sur un VM vierge.
+
+### Prérequis
+
+- Un VM vierge accessible via Tailscale (Ubuntu/Debian)
+- `restic` et `rsync` installés sur la gateway
+- Accès SSH root au VM cible
+
+### Usage interactif (TUI)
+
+```bash
+# Depuis le menu gateway manager
+sudo computile-gateway-manager
+# → "Test restore on a fresh VM"
+
+# Ou directement
+sudo computile-restore-test --interactive
+```
+
+### Usage CLI (non-interactif)
+
+```bash
+sudo computile-restore-test \
+    --client mycompany \
+    --vps vps-prod-01 \
+    --target test-vm.tail1234.ts.net
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--client CLIENT` | Nom du client (sans préfixe `backup-`) |
+| `--vps VPS` | Hostname/ID du VPS |
+| `--target HOST` | Hostname/IP Tailscale du VM cible |
+| `--snapshot ID` | Snapshot spécifique (défaut : `latest`) |
+| `--interactive` | Mode TUI avec sélection guidée |
+| `--ssh-user USER` | User SSH sur la cible (défaut : `root`) |
+| `--ssh-port PORT` | Port SSH (défaut : `22`) |
+| `--skip-db-restore` | Ignorer la restauration des bases de données |
+| `--skip-cleanup` | Conserver les fichiers temporaires |
+| `--report-dir DIR` | Répertoire de sortie du rapport |
+| `--dry-run` | Affiche les étapes sans exécuter |
+
+### Phases d'exécution
+
+1. **Pre-flight** : connectivité SSH, OS cible, espace disque, snapshot restic
+2. **File restore** : extraction locale du snapshot + rsync vers la cible
+3. **Platform** : installation Coolify, restauration SSH keys, APP_PREVIOUS_KEYS
+4. **Databases** : import des dumps MySQL, PostgreSQL, Redis
+5. **Verification** : Docker, containers, dashboard Coolify, connexions DB, apps HTTP
+6. **Cleanup** : suppression des fichiers temporaires
+
+### Rapport
+
+Un rapport détaillé est généré dans `/var/log/computile-backup/restore-test-{client}-{vps}-{date}.log` avec le statut de chaque vérification (OK/KO/WARN/SKIP).
+
+---
+
 ## Points d'attention
 
 - **Mot de passe restic** : sans lui, les données sont irrécupérables. Conservez-le en dehors du serveur sauvegardé.

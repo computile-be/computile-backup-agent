@@ -4,6 +4,18 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.0] - 2026-03-14
+
+### Added
+- **Restore test tool** (`computile-restore-test`): automated end-to-end backup validation on a fresh VM — orchestrates full restore (files, Coolify, databases) via SSH/Tailscale and generates a detailed OK/KO report
+  - Interactive TUI mode (`--interactive`) with client/VPS/snapshot selection via whiptail
+  - CLI mode for scripting (`--client X --vps Y --target Z`)
+  - Automatic Coolify restore: install, SSH keys, APP_PREVIOUS_KEYS, DB import
+  - Database restore: MySQL/MariaDB, PostgreSQL, Redis dump discovery and import
+  - Verification phase: Docker, Coolify dashboard, DB connections, application HTTP checks
+  - Report saved to `/var/log/computile-backup/restore-test-*.log`
+- **Gateway manager**: new "Test restore on a fresh VM" menu entry
+
 ## [1.12.0] - 2026-03-14
 
 ### Fixed

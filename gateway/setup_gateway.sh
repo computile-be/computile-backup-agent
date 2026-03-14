@@ -279,6 +279,13 @@ install_gateway_scripts() {
         info "Remove user script installed: ${INSTALL_BIN}/computile-remove-backup-user"
     fi
 
+    # Restore test script
+    if [[ -f "${SCRIPT_DIR}/restore-test.sh" ]]; then
+        install -m 0755 "${SCRIPT_DIR}/restore-test.sh" \
+            "${INSTALL_BIN}/computile-restore-test"
+        info "Restore test script installed: ${INSTALL_BIN}/computile-restore-test"
+    fi
+
     # Version file
     if [[ -f "${SCRIPT_DIR}/../VERSION" ]]; then
         install -m 0644 "${SCRIPT_DIR}/../VERSION" "${INSTALL_LIB}/VERSION"
@@ -328,7 +335,7 @@ backup_current_scripts() {
     [[ -f "${INSTALL_LIB}/VERSION" ]] && cp "${INSTALL_LIB}/VERSION" "$rollback_dir/"
 
     # Back up installed scripts
-    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user; do
+    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user computile-restore-test; do
         [[ -f "${INSTALL_BIN}/${script}" ]] && cp "${INSTALL_BIN}/${script}" "$rollback_dir/"
     done
 
@@ -463,7 +470,7 @@ rollback_gateway() {
     info "Rollback target:  v${rollback_version}"
 
     # Restore scripts
-    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user; do
+    for script in computile-gateway-manager computile-create-backup-user computile-remove-backup-user computile-restore-test; do
         if [[ -f "$rollback_dir/${script}" ]]; then
             install -m 0755 "$rollback_dir/${script}" "${INSTALL_BIN}/${script}"
         fi

@@ -2376,6 +2376,26 @@ restore_menu() {
 }
 
 # ──────────────────────────────────────────────
+# Restore test (delegates to external script)
+# ──────────────────────────────────────────────
+run_restore_test() {
+    local restore_test_bin="/usr/local/bin/computile-restore-test"
+    if [[ ! -x "$restore_test_bin" ]]; then
+        # Try local path (development)
+        local script_dir
+        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        if [[ -x "${script_dir}/restore-test.sh" ]]; then
+            restore_test_bin="${script_dir}/restore-test.sh"
+        else
+            msg_box "Restore Test" "Restore test script not found.\nInstall with: sudo ./setup_gateway.sh --update"
+            return
+        fi
+    fi
+    # Run in interactive mode
+    "$restore_test_bin" --interactive
+}
+
+# ──────────────────────────────────────────────
 # Main menu
 # ──────────────────────────────────────────────
 main_menu() {
@@ -2403,6 +2423,7 @@ main_menu() {
             "sftp-test"  "Test SFTP setup for a client" \
             "storage"    "Storage breakdown (sizes cached 1h)" \
             "restore"    "Restore files from backup" \
+            "restore-test" "Test restore on a fresh VM" \
             "clearcache" "Refresh size cache" \
             "health"     "System health (SMB, SSH, fail2ban)" \
             "tailscale"  "Tailscale peers (online/offline)" \
@@ -2422,6 +2443,7 @@ main_menu() {
             sftp-test)  test_sftp_client ;;
             storage)    show_storage ;;
             restore)    restore_menu ;;
+            restore-test) run_restore_test ;;
             clearcache) _clear_size_cache ;;
             health)     show_system_health ;;
             tailscale)  show_tailscale_peers ;;
