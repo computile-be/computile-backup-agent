@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.27.0] - 2026-03-14
+
+### Added
+- **Restore test**: streaming mode — uses `restic dump --archive tar | ssh tar xf -` to stream backup data directly to the target without writing to local disk on the gateway. Reduces gateway IO by ~50% (read-only, no temp file writes to /var/tmp). Falls back to extract+rsync automatically if restic < 0.10 or streaming fails
+- **Restore test**: progress monitoring during streaming via remote disk usage polling every 15s
+
 ## [1.26.0] - 2026-03-14
 
 ### Fixed

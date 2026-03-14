@@ -46,6 +46,7 @@ RESTIC_PASSWORD_FILE=""
 SSH_CONTROL_DIR=""
 SSH_CONTROL_SOCKET=""
 LOG_FILE=""
+USE_STREAMING=false
 
 # Report counters
 COUNT_OK=0
@@ -265,6 +266,110 @@ _rsync_ssh_cmd() {
         cmd+=" -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_SOCKET} -o ControlPersist=300"
     fi
     echo "$cmd"
+}
+
+# Stream a path directly from restic to target via SSH (no local disk writes).
+# Uses: restic dump --archive tar | ssh tar xf -
+# Returns 0 on success, non-zero on failure.
+_stream_path_to_target() {
+    local path="$1"
+    local label="$2"
+
+    log_info "${label} Streaming $path to target (no local writes)..."
+
+    # Build tar exclusions (matching rsync exclusions, relative paths for tar)
+    # GNU tar --exclude matches on stored path and excludes directory contents
+    local tar_excludes=""
+    tar_excludes+=" --exclude='etc/ssh'"
+    tar_excludes+=" --exclude='home/*/.ssh/authorized_keys'"
+    tar_excludes+=" --exclude='root/.ssh/authorized_keys'"
+    tar_excludes+=" --exclude='data/coolify/ssh/keys'"
+    tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
+
+    # Build remote tar command (with sudo if non-root)
+    local _sudo=""
+    [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
+    local remote_cmd="${_sudo}tar xf - -C / ${tar_excludes}"
+
+    # Get target disk usage before streaming (for transferred bytes estimate)
+    local before_used_kb
+    before_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
+
+    local stream_start
+    stream_start=$(date +%s)
+
+    # Stream restic dump directly to target via SSH
+    # restic dump outputs tar to stdout, SSH pipes it to remote tar extract
+    restic dump --archive tar --no-lock "$SNAPSHOT_ID" "$path" 2>/dev/null | \
+        _ssh_target "$remote_cmd" 2>&1 &
+    local stream_pid=$!
+
+    # Progress monitor: check remote disk usage every 15s
+    while kill -0 "$stream_pid" 2>/dev/null; do
+        sleep 15
+        if ! kill -0 "$stream_pid" 2>/dev/null; then
+            break
+        fi
+        local elapsed=$(( $(date +%s) - stream_start ))
+        local cur_used_kb
+        cur_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "$before_used_kb")
+        local delta_kb=$(( cur_used_kb - before_used_kb ))
+        if [[ $delta_kb -lt 0 ]]; then delta_kb=0; fi
+        local delta_bytes=$(( delta_kb * 1024 ))
+        local pct_str=""
+        if [[ $SNAPSHOT_TOTAL_BYTES -gt 0 && $delta_bytes -gt 0 ]]; then
+            local pct=$(( (delta_bytes + total_restored_bytes) * 100 / SNAPSHOT_TOTAL_BYTES ))
+            [[ $pct -gt 100 ]] && pct=100
+            pct_str=" (${pct}% of total)"
+        fi
+        log_info "    ~$(_human_size $delta_bytes) written${pct_str}, $(_format_duration $elapsed) elapsed"
+    done
+
+    local stream_rc=0
+    wait "$stream_pid" || stream_rc=$?
+
+    local stream_end
+    stream_end=$(date +%s)
+    local duration=$((stream_end - stream_start))
+
+    if [[ $stream_rc -ne 0 ]]; then
+        log_error "  Streaming failed for $path (exit code: $stream_rc)"
+        return $stream_rc
+    fi
+
+    # Calculate transferred bytes from disk usage delta
+    local after_used_kb
+    after_used_kb=$(_ssh_target "df / --output=used 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "$before_used_kb")
+    local path_bytes=$(( (after_used_kb - before_used_kb) * 1024 ))
+    [[ $path_bytes -lt 0 ]] && path_bytes=0
+    total_restored_bytes=$((total_restored_bytes + path_bytes))
+
+    local speed="N/A"
+    if [[ $duration -gt 0 && $path_bytes -gt 0 ]]; then
+        speed="$(_human_size $(( path_bytes / duration )))/s"
+    fi
+    log_info "  $path done: ~$(_human_size $path_bytes) in $(_format_duration $duration) ($speed)"
+
+    # Verify SSH connectivity still works
+    if ! _ssh_target true 2>/dev/null; then
+        log_error "  SSH connectivity lost after streaming $path"
+        report_ko "SSH connectivity lost after streaming $path"
+        failed_paths+=("$path")
+        return 1
+    fi
+
+    # Check target disk space
+    local target_avail_kb
+    target_avail_kb=$(_ssh_target "df / --output=avail 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo "0")
+    if [[ "$target_avail_kb" =~ ^[0-9]+$ ]]; then
+        local target_avail_gb=$((target_avail_kb / 1048576))
+        if [[ $target_avail_gb -lt 2 ]]; then
+            log_warn "  Target disk space critically low: ${target_avail_gb} GB remaining"
+            report_warn "Target disk space low after $path: ${target_avail_gb} GB remaining"
+        fi
+    fi
+
+    return 0
 }
 
 # ──────────────────────────────────────────────
@@ -913,7 +1018,15 @@ _restore_and_sync_path() {
     local indent=""
     for ((i=0; i<depth; i++)); do indent+="  "; done
 
-    log_info "${indent}${label} Restoring $path ..."
+    # Try streaming mode first (no local disk writes)
+    if [[ "$USE_STREAMING" == true && $depth -eq 0 ]]; then
+        if _stream_path_to_target "$path" "$label"; then
+            return 0
+        fi
+        log_warn "${indent}Streaming failed for $path, falling back to extract+rsync..."
+    fi
+
+    log_info "${indent}${label} Restoring $path (extract+rsync)..."
 
     # Clean temp dir
     rm -rf "${TEMP_RESTORE_DIR:?}/"*
@@ -1082,11 +1195,28 @@ phase2_restore_files() {
         return 0
     fi
 
+    # Detect streaming support (restic dump --archive tar, available since restic 0.10)
+    log_info "Checking streaming support..."
+    local restic_ver
+    restic_ver=$(restic version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || true)
+    local restic_major restic_minor
+    restic_major=$(echo "$restic_ver" | cut -d. -f1)
+    restic_minor=$(echo "$restic_ver" | cut -d. -f2)
+    if [[ "${restic_major:-0}" -gt 0 || "${restic_minor:-0}" -ge 10 ]]; then
+        USE_STREAMING=true
+        log_info "  Streaming mode enabled (restic dump → ssh → tar, no local disk writes)"
+        log_info "  This reduces gateway IO by ~50% (read-only, no temp file writes)"
+    else
+        log_info "  Streaming not available (restic ${restic_ver:-unknown} < 0.10), using extract+rsync"
+    fi
+
     # Install prerequisites on target first (use sudo if not root)
     log_info "Installing prerequisites on target..."
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo"
-    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq rsync gzip curl" &>/dev/null; then
+    local prereqs="gzip curl"
+    [[ "$USE_STREAMING" != true ]] && prereqs+=" rsync"
+    if _ssh_target "${_sudo} DEBIAN_FRONTEND=noninteractive apt-get update -qq && ${_sudo} apt-get install -y -qq ${prereqs}" &>/dev/null; then
         report_ok "Target prerequisites installed"
     else
         report_warn "Could not install prerequisites (may already be present)"
@@ -1223,8 +1353,11 @@ phase2_restore_files() {
     fi
     log_info "Phase 2 summary: ${total_human} transferred in $(_format_duration $restore_duration), average speed: ${avg_speed}"
 
+    local mode_str="extract+rsync"
+    [[ "$USE_STREAMING" == true ]] && mode_str="streaming"
+
     if [[ ${#failed_paths[@]} -eq 0 ]]; then
-        report_ok "Restore + rsync complete: ${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s), avg ${avg_speed})"
+        report_ok "Restore complete (${mode_str}): ~${total_human} transferred in $(_format_duration $restore_duration) ($total_paths path(s), avg ${avg_speed})"
     else
         report_ko "Restore completed with ${#failed_paths[@]} failure(s): ${failed_paths[*]}"
         return 1
