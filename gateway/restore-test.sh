@@ -270,71 +270,78 @@ _rsync_ssh_cmd() {
 }
 
 # Deploy a watchdog script on the target that monitors /etc/passwd and re-injects
-# the SSH user if it gets overwritten by rsync. Runs in background on the target.
-# This ensures SSH stays alive even after /etc is fully restored from backup.
-# Args: $1 = saved backup blob from pre-restore
+# the SSH user if it gets overwritten by rsync. Reads saved data from /tmp/computile-ssh-save/.
+# Runs in background, polls every 2s, auto-exits after 30 minutes.
 _deploy_ssh_watchdog() {
-    local backup_blob="$1"
-
-    # Parse saved data
-    local passwd_line shadow_line group_line user_groups sudoers_line
-    passwd_line=$(echo "$backup_blob" | grep "^PASSWD:" | head -1 | sed 's/^PASSWD://')
-    shadow_line=$(echo "$backup_blob" | grep "^SHADOW:" | head -1 | sed 's/^SHADOW://')
-    group_line=$(echo "$backup_blob" | grep "^GROUP:" | head -1 | sed 's/^GROUP://')
-    user_groups=$(echo "$backup_blob" | grep "^GROUPS:" | head -1 | sed 's/^GROUPS://')
-    sudoers_line=$(echo "$backup_blob" | grep "^SUDOERS:" | head -1 | sed 's/^SUDOERS://')
-
-    local auth_keys=""
-    auth_keys=$(echo "$backup_blob" | sed -n '/^AUTHKEYS_START$/,/^AUTHKEYS_END$/p' | grep -v '^AUTHKEYS_' || true)
-
-    local user_home user_uid user_gid
-    user_home=$(echo "$passwd_line" | cut -d: -f6)
-    user_uid=$(echo "$passwd_line" | cut -d: -f3)
-    user_gid=$(echo "$passwd_line" | cut -d: -f4)
-
-    # Build the watchdog script that will run on the target
-    # It polls /etc/passwd every 2s and re-injects the user if missing
-    # Auto-exits after 30 minutes (safety net)
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
-    _ssh_target "${_sudo}bash -c 'cat > /tmp/computile-ssh-watchdog.sh << '\"'\"'WATCHDOG_EOF'\"'\"'
+    # Deploy the watchdog script and start it in background
+    _ssh_target "${_sudo}bash -s" <<'DEPLOY_EOF' 2>/dev/null || {
+SAVE_DIR="/tmp/computile-ssh-save"
+
+cat > /tmp/computile-ssh-watchdog.sh <<'WATCHDOG_SCRIPT'
 #!/bin/bash
-# Computile restore SSH watchdog — re-injects SSH user if /etc/passwd is overwritten
-DEADLINE=\$((SECONDS + 1800))
-USER=\"${SSH_USER}\"
-while [ \$SECONDS -lt \$DEADLINE ]; do
-    if ! grep -q \"^\${USER}:\" /etc/passwd 2>/dev/null; then
-        # User missing — re-inject
-        echo \"${passwd_line}\" >> /etc/passwd
-        [ -n \"${shadow_line}\" ] && echo \"${shadow_line}\" >> /etc/shadow
-        [ -n \"${group_line}\" ] && ! grep -q \"^${SSH_USER}:\" /etc/group && echo \"${group_line}\" >> /etc/group
-        # Supplementary groups
-        for g in ${user_groups}; do
-            grep -q \"^\${g}:\" /etc/group 2>/dev/null && usermod -aG \"\${g}\" \"${SSH_USER}\" 2>/dev/null || true
-        done
-        # Sudoers
-        [ -n \"${sudoers_line}\" ] && echo \"${sudoers_line}\" > \"/etc/sudoers.d/${SSH_USER}\" && chmod 440 \"/etc/sudoers.d/${SSH_USER}\"
-        # Home + authorized_keys
-        mkdir -p \"${user_home}/.ssh\"
-        chmod 700 \"${user_home}/.ssh\"
-        chown ${user_uid}:${user_gid} \"${user_home}\" \"${user_home}/.ssh\"
-        if [ -n \"${auth_keys}\" ]; then
-            echo \"${auth_keys}\" > \"${user_home}/.ssh/authorized_keys\"
-            chmod 600 \"${user_home}/.ssh/authorized_keys\"
-            chown ${user_uid}:${user_gid} \"${user_home}/.ssh/authorized_keys\"
+SAVE_DIR="/tmp/computile-ssh-save"
+[ ! -d "$SAVE_DIR" ] && exit 1
+
+USER_LINE=$(cat "$SAVE_DIR/passwd_line" 2>/dev/null)
+[ -z "$USER_LINE" ] && exit 1
+
+USERNAME=$(echo "$USER_LINE" | cut -d: -f1)
+USER_UID=$(echo "$USER_LINE" | cut -d: -f3)
+USER_GID=$(echo "$USER_LINE" | cut -d: -f4)
+USER_HOME=$(cat "$SAVE_DIR/home_dir" 2>/dev/null)
+
+DEADLINE=$((SECONDS + 1800))
+while [ $SECONDS -lt $DEADLINE ]; do
+    if ! grep -q "^${USERNAME}:" /etc/passwd 2>/dev/null; then
+        # User missing — re-inject from saved files
+        cat "$SAVE_DIR/passwd_line" >> /etc/passwd
+        [ -f "$SAVE_DIR/shadow_line" ] && [ -s "$SAVE_DIR/shadow_line" ] && cat "$SAVE_DIR/shadow_line" >> /etc/shadow
+        if [ -f "$SAVE_DIR/group_line" ] && [ -s "$SAVE_DIR/group_line" ]; then
+            grep -q "^${USERNAME}:" /etc/group 2>/dev/null || cat "$SAVE_DIR/group_line" >> /etc/group
         fi
-        # Restart sshd
+
+        # Supplementary groups
+        if [ -f "$SAVE_DIR/groups" ]; then
+            for g in $(cat "$SAVE_DIR/groups"); do
+                grep -q "^${g}:" /etc/group 2>/dev/null && usermod -aG "$g" "$USERNAME" 2>/dev/null || true
+            done
+        fi
+
+        # Sudoers
+        if [ -f "$SAVE_DIR/sudoers_file" ]; then
+            cp "$SAVE_DIR/sudoers_file" "/etc/sudoers.d/${USERNAME}"
+            chmod 440 "/etc/sudoers.d/${USERNAME}"
+        fi
+
+        # Home + authorized_keys
+        mkdir -p "${USER_HOME}/.ssh"
+        chmod 700 "${USER_HOME}/.ssh"
+        chown ${USER_UID}:${USER_GID} "${USER_HOME}" "${USER_HOME}/.ssh"
+        if [ -f "$SAVE_DIR/authorized_keys" ]; then
+            cp "$SAVE_DIR/authorized_keys" "${USER_HOME}/.ssh/authorized_keys"
+            chmod 600 "${USER_HOME}/.ssh/authorized_keys"
+            chown ${USER_UID}:${USER_GID} "${USER_HOME}/.ssh/authorized_keys"
+        fi
+
+        # Restore SSH host keys + sshd config (so gateway can reconnect with same host key)
+        cp "$SAVE_DIR"/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
+        cp "$SAVE_DIR/ssh/sshd_config" /etc/ssh/sshd_config 2>/dev/null || true
+
+        # Restart sshd to pick up restored host keys
         systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
     fi
     sleep 2
 done
 rm -f /tmp/computile-ssh-watchdog.sh /tmp/computile-ssh-watchdog.pid
-WATCHDOG_EOF
+WATCHDOG_SCRIPT
+
 chmod +x /tmp/computile-ssh-watchdog.sh
 nohup /tmp/computile-ssh-watchdog.sh > /tmp/computile-ssh-watchdog.log 2>&1 &
-echo \$! > /tmp/computile-ssh-watchdog.pid
-'" 2>/dev/null || {
+echo $! > /tmp/computile-ssh-watchdog.pid
+DEPLOY_EOF
         log_warn "  Could not deploy SSH watchdog"
         return 1
     }
@@ -346,7 +353,7 @@ _stop_ssh_watchdog() {
     _ssh_target "sudo bash -c '
         if [ -f /tmp/computile-ssh-watchdog.pid ]; then
             kill \$(cat /tmp/computile-ssh-watchdog.pid) 2>/dev/null || true
-            rm -f /tmp/computile-ssh-watchdog.sh /tmp/computile-ssh-watchdog.pid /tmp/computile-ssh-watchdog.log
+            rm -rf /tmp/computile-ssh-watchdog.sh /tmp/computile-ssh-watchdog.pid /tmp/computile-ssh-watchdog.log /tmp/computile-ssh-save
         fi
     '" 2>/dev/null || true
 }
@@ -1403,16 +1410,24 @@ _restore_and_sync_path() {
     if ! _ssh_target true 2>/dev/null; then
         log_warn "${indent}  SSH lost after rsync of $path — waiting for watchdog to re-inject user..."
         _cleanup_ssh_control
+        # Clear known_hosts entry — host key may have changed during rsync
+        ssh-keygen -R "$TARGET" 2>/dev/null || true
+        ssh-keygen -R "[$TARGET]:$SSH_PORT" 2>/dev/null || true
         # Wait for the watchdog (polls every 2s) to re-inject the user + restart sshd
         local ssh_ok=false
-        for attempt in 1 2 3 4 5; do
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
             sleep 3
-            _setup_ssh_control
-            if _ssh_target true 2>/dev/null; then
-                ssh_ok=true
-                break
+            # Try direct SSH without ControlMaster, accept any host key
+            if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+                -p "$SSH_PORT" "${SSH_USER}@${TARGET}" true 2>/dev/null; then
+                # Re-establish ControlMaster now that SSH works
+                _setup_ssh_control
+                if _ssh_target true 2>/dev/null; then
+                    ssh_ok=true
+                    break
+                fi
+                _cleanup_ssh_control
             fi
-            _cleanup_ssh_control
         done
 
         if ! $ssh_ok; then
@@ -1614,42 +1629,42 @@ phase2_restore_files() {
     log_info "Saving SSH user '${SSH_USER}' identity from target before restore..."
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
-    local ssh_user_backup
-    ssh_user_backup=$(_ssh_target "${_sudo}bash -c '
-        u=\"${SSH_USER}\"
-        echo \"PASSWD:\$(grep \"^\${u}:\" /etc/passwd)\"
-        echo \"SHADOW:\$(${_sudo}grep \"^\${u}:\" /etc/shadow 2>/dev/null)\"
-        echo \"GROUP:\$(grep \"^\${u}:\" /etc/group 2>/dev/null)\"
-        # All groups the user belongs to
-        echo \"GROUPS:\$(id -nG \"\$u\" 2>/dev/null)\"
-        # sudoers entry
-        if [ -f \"/etc/sudoers.d/\${u}\" ]; then
-            echo \"SUDOERS:\$(cat /etc/sudoers.d/\${u})\"
-        elif ${_sudo}grep -q \"^\${u} \" /etc/sudoers 2>/dev/null; then
-            echo \"SUDOERS:\$(${_sudo}grep \"^\${u} \" /etc/sudoers)\"
-        fi
-        # SSH authorized keys
-        home=\$(eval echo \"~\${u}\")
-        if [ -f \"\${home}/.ssh/authorized_keys\" ]; then
-            echo \"AUTHKEYS_START\"
-            cat \"\${home}/.ssh/authorized_keys\"
-            echo \"AUTHKEYS_END\"
-        fi
-        # SSH host keys (sshd identity)
-        echo \"HOSTKEYS_START\"
-        for f in /etc/ssh/ssh_host_*; do
-            [ -f \"\$f\" ] && echo \"FILE:\$f\" && ${_sudo}cat \"\$f\" && echo \"ENDFILE\"
-        done
-        echo \"HOSTKEYS_END\"
-    '" 2>/dev/null) || true
 
-    if echo "$ssh_user_backup" | grep -q "^PASSWD:${SSH_USER}:"; then
+    # Save critical files to a temp dir on the target (file copies, no quoting issues)
+    local watchdog_ok=false
+    if _ssh_target "${_sudo}bash -s" <<SAVE_EOF 2>/dev/null; then
+set -e
+SAVE_DIR="/tmp/computile-ssh-save"
+rm -rf "\$SAVE_DIR" && mkdir -p "\$SAVE_DIR/ssh"
+
+# User identity
+grep "^${SSH_USER}:" /etc/passwd > "\$SAVE_DIR/passwd_line" || true
+grep "^${SSH_USER}:" /etc/shadow > "\$SAVE_DIR/shadow_line" 2>/dev/null || true
+grep "^${SSH_USER}:" /etc/group > "\$SAVE_DIR/group_line" 2>/dev/null || true
+id -nG "${SSH_USER}" > "\$SAVE_DIR/groups" 2>/dev/null || true
+
+# Sudoers
+if [ -f "/etc/sudoers.d/${SSH_USER}" ]; then
+    cp "/etc/sudoers.d/${SSH_USER}" "\$SAVE_DIR/sudoers_file"
+fi
+
+# Authorized keys
+home=\$(eval echo "~${SSH_USER}")
+if [ -f "\${home}/.ssh/authorized_keys" ]; then
+    cp "\${home}/.ssh/authorized_keys" "\$SAVE_DIR/authorized_keys"
+fi
+echo "\${home}" > "\$SAVE_DIR/home_dir"
+
+# SSH host keys (preserve sshd identity so gateway can reconnect)
+cp /etc/ssh/ssh_host_* "\$SAVE_DIR/ssh/" 2>/dev/null || true
+cp /etc/ssh/sshd_config "\$SAVE_DIR/ssh/" 2>/dev/null || true
+SAVE_EOF
         log_info "  Saved: user entry, groups, authorized_keys, host keys"
 
-        # Deploy a watchdog on the target that re-injects the SSH user if /etc/passwd
-        # gets overwritten by rsync. This runs in background and ensures SSH stays alive.
+        # Deploy watchdog
         log_info "  Deploying SSH user watchdog on target..."
-        _deploy_ssh_watchdog "$ssh_user_backup"
+        _deploy_ssh_watchdog
+        watchdog_ok=true
     else
         log_warn "  Could not save SSH user identity — SSH may break after /etc restore"
     fi
