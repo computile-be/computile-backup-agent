@@ -4,6 +4,11 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.28.1] - 2026-03-14
+
+### Changed
+- **Restore test**: progress logs now show segment speed (last 15s) alongside cumulative average (e.g. `6.7 MB/s, avg 16.8 MB/s`)
+
 ## [1.28.0] - 2026-03-14
 
 ### Added

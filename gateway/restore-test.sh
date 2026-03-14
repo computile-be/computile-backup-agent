@@ -307,6 +307,8 @@ _stream_path_to_target() {
     local stream_pid=$!
 
     # Progress monitor: check remote disk usage every 15s
+    local prev_delta_bytes=0
+    local prev_elapsed=0
     while kill -0 "$stream_pid" 2>/dev/null; do
         sleep 15
         if ! kill -0 "$stream_pid" 2>/dev/null; then
@@ -324,11 +326,19 @@ _stream_path_to_target() {
             [[ $pct -gt 100 ]] && pct=100
             pct_str=" (${pct}% of total)"
         fi
+        # Segment speed (last 15s) + average speed
         local speed_str=""
+        local seg_seconds=$(( elapsed - prev_elapsed ))
+        local seg_bytes=$(( delta_bytes - prev_delta_bytes ))
+        if [[ $seg_seconds -gt 0 && $seg_bytes -gt 0 ]]; then
+            speed_str=", $(_human_size $(( seg_bytes / seg_seconds )))/s"
+        fi
         if [[ $elapsed -gt 0 && $delta_bytes -gt 0 ]]; then
-            speed_str=", $(_human_size $(( delta_bytes / elapsed )))/s"
+            speed_str+=", avg $(_human_size $(( delta_bytes / elapsed )))/s"
         fi
         log_info "    ~$(_human_size $delta_bytes) written${pct_str}${speed_str}, $(_format_duration $elapsed) elapsed"
+        prev_delta_bytes=$delta_bytes
+        prev_elapsed=$elapsed
     done
 
     local stream_rc=0
@@ -412,6 +422,8 @@ _stream_full_to_target() {
     local stream_pid=$!
 
     # Progress monitor: check remote disk usage every 15s
+    local prev_delta_bytes=0
+    local prev_elapsed=0
     while kill -0 "$stream_pid" 2>/dev/null; do
         sleep 15
         if ! kill -0 "$stream_pid" 2>/dev/null; then
@@ -429,11 +441,19 @@ _stream_full_to_target() {
             [[ $pct -gt 100 ]] && pct=100
             pct_str=" (${pct}% of total)"
         fi
+        # Segment speed (last 15s) + average speed
         local speed_str=""
+        local seg_seconds=$(( elapsed - prev_elapsed ))
+        local seg_bytes=$(( delta_bytes - prev_delta_bytes ))
+        if [[ $seg_seconds -gt 0 && $seg_bytes -gt 0 ]]; then
+            speed_str=", $(_human_size $(( seg_bytes / seg_seconds )))/s"
+        fi
         if [[ $elapsed -gt 0 && $delta_bytes -gt 0 ]]; then
-            speed_str=", $(_human_size $(( delta_bytes / elapsed )))/s"
+            speed_str+=", avg $(_human_size $(( delta_bytes / elapsed )))/s"
         fi
         log_info "    ~$(_human_size $delta_bytes) written${pct_str}${speed_str}, $(_format_duration $elapsed) elapsed"
+        prev_delta_bytes=$delta_bytes
+        prev_elapsed=$elapsed
     done
 
     local stream_rc=0
