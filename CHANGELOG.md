@@ -4,6 +4,13 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.17.0] - 2026-03-14
+
+### Improved
+- **Restore test**: show SSH key fingerprint and file path at every step (already authorized, password copy, manual setup)
+- **Restore test**: verify and confirm SSH connection after key deployment with explicit success/failure message
+- **Restore test**: display key details in the setup menu when key is not yet authorized
+
 ## [1.16.0] - 2026-03-14
 
 ### Improved
