@@ -4,6 +4,12 @@ All notable changes to computile-backup-agent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.31.1] - 2026-03-14
+
+### Changed
+- **Restore test**: default `--ssh-user` is now `computile-restore` (was `root`). If the user already exists on the target, it is reused; otherwise it is created automatically from the initial SSH user
+- **Docs**: updated `RESTORE.md` section 9 with detailed setup instructions for the `computile-restore` user, SSH connection management explanation, and all CLI options
+
 ## [1.31.0] - 2026-03-14
 
 ### Added

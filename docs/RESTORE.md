@@ -362,7 +362,33 @@ L'outil `computile-restore-test` permet de valider qu'un backup est fonctionnel 
 
 - Un VM vierge accessible via Tailscale (Ubuntu/Debian)
 - `restic` et `rsync` installés sur la gateway
-- Accès SSH root au VM cible
+- Un utilisateur SSH sur la cible avec accès sudo (par défaut : `computile-restore`)
+
+### Préparation du VM cible
+
+L'outil utilise par défaut l'utilisateur `computile-restore` sur la cible. Deux options :
+
+**Option 1 : Utilisateur pré-créé (recommandé)**
+
+Créer l'utilisateur `computile-restore` sur le VM cible avant le test :
+
+```bash
+# Sur le VM cible
+sudo useradd -r -m -d /tmp/computile-restore -s /bin/bash computile-restore
+echo "computile-restore ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/computile-restore
+sudo chmod 440 /etc/sudoers.d/computile-restore
+
+# Copier la clé SSH de la gateway
+sudo mkdir -p /tmp/computile-restore/.ssh
+sudo cp ~/.ssh/authorized_keys /tmp/computile-restore/.ssh/  # ou ajouter la clé de la gateway
+sudo chown -R computile-restore:computile-restore /tmp/computile-restore
+```
+
+> **Pourquoi `/tmp` comme home ?** Pendant le restore, rsync écrase `/home` et `/etc` avec les données du backup. Un utilisateur classique (home dans `/home`) verrait son répertoire et ses credentials remplacés, cassant la connexion SSH. Le home dans `/tmp` est hors du périmètre de restore.
+
+**Option 2 : Création automatique**
+
+Si vous vous connectez avec un autre utilisateur (ex: `--ssh-user root`), l'outil crée automatiquement `computile-restore` sur la cible et bascule dessus. L'utilisateur est supprimé en fin de test.
 
 ### Usage interactif (TUI)
 
@@ -378,10 +404,18 @@ sudo computile-restore-test --interactive
 ### Usage CLI (non-interactif)
 
 ```bash
+# Avec l'utilisateur computile-restore pré-créé (défaut)
 sudo computile-restore-test \
     --client mycompany \
     --vps vps-prod-01 \
     --target test-vm.tail1234.ts.net
+
+# Avec un autre utilisateur initial (crée computile-restore automatiquement)
+sudo computile-restore-test \
+    --client mycompany \
+    --vps vps-prod-01 \
+    --target test-vm.tail1234.ts.net \
+    --ssh-user root
 ```
 
 ### Options
@@ -393,21 +427,30 @@ sudo computile-restore-test \
 | `--target HOST` | Hostname/IP Tailscale du VM cible |
 | `--snapshot ID` | Snapshot spécifique (défaut : `latest`) |
 | `--interactive` | Mode TUI avec sélection guidée |
-| `--ssh-user USER` | User SSH sur la cible (défaut : `root`) |
+| `--ssh-user USER` | User SSH sur la cible (défaut : `computile-restore`) |
 | `--ssh-port PORT` | Port SSH (défaut : `22`) |
+| `--no-streaming` | Forcer le mode extract+rsync (désactiver le streaming) |
 | `--skip-db-restore` | Ignorer la restauration des bases de données |
 | `--skip-cleanup` | Conserver les fichiers temporaires |
 | `--report-dir DIR` | Répertoire de sortie du rapport |
 | `--dry-run` | Affiche les étapes sans exécuter |
 
+### Gestion de la connexion SSH pendant le restore
+
+Le restore écrase des fichiers système critiques (`/etc/passwd`, `/etc/shadow`, `/etc/ssh/`, `/home/`) qui peuvent casser la connexion SSH. L'outil gère cela de deux façons :
+
+1. **Utilisateur dédié** : `computile-restore` a son home dans `/tmp` (jamais touché par le restore). Ainsi, le rsync de `/home` ne casse pas la connexion.
+
+2. **Fixup automatique** : un script wrapper rsync s'exécute sur la cible après chaque rsync. Il ré-injecte l'utilisateur `computile-restore` dans `/etc/passwd`, restaure les clés SSH host et redémarre sshd — le tout dans la **même session SSH** que rsync. La connexion n'est jamais perdue.
+
 ### Phases d'exécution
 
-1. **Pre-flight** : connectivité SSH, OS cible, espace disque, snapshot restic
-2. **File restore** : extraction locale du snapshot + rsync vers la cible
+1. **Pre-flight** : connectivité SSH, OS cible, espace disque, mémoire, snapshot restic
+2. **File restore** : extraction locale du snapshot + rsync vers la cible (ou streaming direct)
 3. **Platform** : installation Coolify, restauration SSH keys, APP_PREVIOUS_KEYS
 4. **Databases** : import des dumps MySQL, PostgreSQL, Redis
 5. **Verification** : Docker, containers, dashboard Coolify, connexions DB, apps HTTP
-6. **Cleanup** : suppression des fichiers temporaires
+6. **Cleanup** : suppression des fichiers temporaires et de l'utilisateur restore
 
 ### Rapport
 

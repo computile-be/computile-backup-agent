@@ -27,7 +27,7 @@ CLIENT=""
 VPS=""
 TARGET=""
 SNAPSHOT_ID=""
-SSH_USER="root"
+SSH_USER="computile-restore"
 SSH_PORT=22
 INTERACTIVE=false
 SKIP_DB_RESTORE=false
@@ -372,7 +372,21 @@ _cleanup_ssh_fixup() {
 # Create a dedicated restore user on the target.
 # This user's home is in /tmp (not /home), so rsync of /home won't break SSH.
 # The rsync wrapper + fixup handles /etc overwrites (re-injects this user after rsync).
+# Skipped if already connecting as the restore user (user pre-exists on target).
 _create_restore_user() {
+    # If already connecting as the restore user, it exists — just verify sudo works
+    if [[ "$SSH_USER" == "$RESTORE_USER" ]]; then
+        log_info "Already connected as '${RESTORE_USER}' — verifying sudo access..."
+        if _ssh_target "sudo true" 2>/dev/null; then
+            log_info "  Sudo access OK"
+            RESTORE_USER_CREATED=false  # Don't delete on cleanup — user was pre-existing
+            return 0
+        else
+            log_error "  User '${RESTORE_USER}' has no sudo access"
+            return 1
+        fi
+    fi
+
     local _sudo=""
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
@@ -1127,7 +1141,7 @@ Required (non-interactive mode):
 Optional:
   --snapshot ID          Snapshot ID (default: latest)
   --interactive          Use TUI (whiptail) for selection
-  --ssh-user USER        SSH user on target (default: root)
+  --ssh-user USER        SSH user on target (default: computile-restore)
   --ssh-port PORT        SSH port on target (default: 22)
   --skip-db-restore      Skip database restoration phase
   --skip-cleanup         Do not clean up temp files
