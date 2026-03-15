@@ -1385,6 +1385,12 @@ phase1_preflight() {
     fi
 
     # Check SSH connectivity
+    # When resuming from Phase 3+, target was restored — host keys may have changed
+    if [[ $START_FROM_PHASE -gt 1 ]]; then
+        log_info "Clearing known_hosts for target (host keys may have changed after restore)..."
+        ssh-keygen -R "$TARGET" 2>/dev/null || true
+        ssh-keygen -R "[${TARGET}]:${SSH_PORT}" 2>/dev/null || true
+    fi
     log_info "Testing SSH connectivity to ${TARGET}..."
     if $DRY_RUN; then
         report_ok "SSH connectivity (dry-run)"
