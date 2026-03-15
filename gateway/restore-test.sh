@@ -283,6 +283,7 @@ _deploy_ssh_fixup() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
     _ssh_target "${_sudo}bash -s" <<'FIXUP_DEPLOY_EOF' 2>/dev/null || {
+PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 SAVE_DIR="/tmp/computile-ssh-save"
 
 cat > /tmp/computile-ssh-fixup.sh <<'FIXUP_SCRIPT'
@@ -482,6 +483,7 @@ _setup_resilient_ssh() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
     if _ssh_target "${_sudo}bash -s" <<RESILIENT_EOF 2>/dev/null; then
+PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 set -e
 
 # System-wide authorized_keys directory
@@ -1574,6 +1576,8 @@ phase2_restore_files() {
 
     local fixup_ok=false
     if _ssh_target "${_sudo_save}bash -s" <<SAVE_EOF 2>/dev/null; then
+# Suppress prompts (ssh -tt allocates TTY, bash would print PS1 after each line)
+PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 set -e
 SAVE_DIR="/tmp/computile-ssh-save"
 rm -rf "\$SAVE_DIR" && mkdir -p "\$SAVE_DIR/ssh"
@@ -1623,7 +1627,7 @@ SAVE_EOF
         _setup_resilient_ssh
 
         # Now save the newly created sshd snippet into the save dir
-        _ssh_target "${_sudo_save}bash -c '
+        _ssh_target "${_sudo_save}env PS1= PROMPT_COMMAND= bash -c '
             SAVE_DIR=/tmp/computile-ssh-save
             [ -f /etc/ssh/sshd_config.d/99-computile-restore.conf ] && cp /etc/ssh/sshd_config.d/99-computile-restore.conf \$SAVE_DIR/sshd_snippet 2>/dev/null || true
             [ -f /etc/ssh/authorized_keys/${SSH_USER} ] && cp /etc/ssh/authorized_keys/${SSH_USER} \$SAVE_DIR/syswide_authorized_keys 2>/dev/null || true
