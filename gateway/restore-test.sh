@@ -1833,7 +1833,8 @@ phase3_platform() {
     log_info "Installing Coolify on target..."
     local _sudo_coolify=""
     [[ "$SSH_USER" != "root" ]] && _sudo_coolify="sudo "
-    if _ssh_target "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
+    # Coolify installer runs sudo internally — needs TTY
+    if _ssh_target_interactive "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
         report_ok "Coolify installed on target"
     else
         report_ko "Coolify installation failed"
@@ -1906,7 +1907,8 @@ phase3_platform() {
 
     # Step 7: Restart Coolify
     log_info "Restarting Coolify..."
-    if _ssh_target "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
+    # Coolify installer runs sudo internally — needs TTY
+    if _ssh_target_interactive "${_sudo_coolify}bash -c 'curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -e'" 2>&1; then
         report_ok "Coolify restarted"
     else
         report_ko "Coolify restart failed"
