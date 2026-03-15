@@ -550,11 +550,14 @@ _stream_path_to_target() {
     # Tell the target which path is being restored (path-aware fixup)
     _set_restore_path "$path"
 
-    # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
+    # Build tar exclusions — Coolify SSH keys (Phase 3) + fixup data (must not be overwritten)
     # All /etc files are fully restored; the inline fixup re-injects SSH identity after tar
     local tar_excludes=""
     tar_excludes+=" --exclude='data/coolify/ssh/keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
+    tar_excludes+=" --exclude='tmp/computile-ssh-save'"
+    tar_excludes+=" --exclude='tmp/computile-ssh-fixup.sh'"
+    tar_excludes+=" --exclude='tmp/computile-restore-current-path'"
 
     # Build remote command: tar extract + inline SSH fixup
     # The fixup runs within the SAME SSH session, after tar completes,
@@ -693,10 +696,13 @@ _stream_full_to_target() {
     # Full dump = all paths at once; set path to "/" so fixup does full repair
     _set_restore_path "/"
 
-    # Build tar exclusions — only Coolify SSH keys (handled in Phase 3)
+    # Build tar exclusions — Coolify SSH keys (Phase 3) + fixup data (must not be overwritten)
     local tar_excludes=""
     tar_excludes+=" --exclude='data/coolify/ssh/keys'"
     tar_excludes+=" --exclude='data/coolify/ssh/id.*'"
+    tar_excludes+=" --exclude='tmp/computile-ssh-save'"
+    tar_excludes+=" --exclude='tmp/computile-ssh-fixup.sh'"
+    tar_excludes+=" --exclude='tmp/computile-restore-current-path'"
 
     # Build remote command: tar extract + inline SSH fixup
     local _sudo=""
