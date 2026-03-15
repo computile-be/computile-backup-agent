@@ -232,11 +232,12 @@ _cleanup_ssh_control() {
 }
 
 _ssh_target() {
-    # -tt forces pseudo-TTY allocation even when stdin is not a terminal.
-    # Required for sudo on targets with Defaults use_pty (Debian 13+).
+    # -T disables TTY allocation — no prompts, cleaner output.
+    # Requires target to have Defaults:user !use_pty in sudoers (Debian 13+).
+    # Phase 1 config adds !use_pty when setting up NOPASSWD.
     # shellcheck disable=SC2046
     ssh $(_ssh_common_opts) \
-        -tt -o BatchMode=yes \
+        -T -o BatchMode=yes \
         "${SSH_USER}@${TARGET}" "$@"
 }
 
@@ -283,7 +284,6 @@ _deploy_ssh_fixup() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
     _ssh_target "${_sudo}bash -s" <<'FIXUP_DEPLOY_EOF' 2>/dev/null || {
-PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 SAVE_DIR="/tmp/computile-ssh-save"
 
 cat > /tmp/computile-ssh-fixup.sh <<'FIXUP_SCRIPT'
@@ -483,7 +483,6 @@ _setup_resilient_ssh() {
     [[ "$SSH_USER" != "root" ]] && _sudo="sudo "
 
     if _ssh_target "${_sudo}bash -s" <<RESILIENT_EOF 2>/dev/null; then
-PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 set -e
 
 # System-wide authorized_keys directory
@@ -1404,18 +1403,18 @@ phase1_preflight() {
             report_ok "Passwordless sudo for ${SSH_USER}"
         else
             log_info "  Configuring passwordless sudo for ${SSH_USER}..."
-            # Try to set up NOPASSWD via the existing SSH session (user may have
-            # password-based sudo or be in a group with partial sudo access)
-            if _ssh_target "echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER} >/dev/null && sudo chmod 440 /etc/sudoers.d/${SSH_USER}" &>/dev/null; then
+            # Try to set up NOPASSWD + !use_pty via the existing SSH session.
+            # Use _ssh_target_interactive (-t) because sudo may need TTY before !use_pty is set.
+            if _ssh_target_interactive "printf '%s\n%s\n' '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' 'Defaults:${SSH_USER} !use_pty' | sudo tee /etc/sudoers.d/${SSH_USER} >/dev/null && sudo chmod 440 /etc/sudoers.d/${SSH_USER}" &>/dev/null; then
                 if _ssh_target "sudo -n true" &>/dev/null; then
                     report_ok "Passwordless sudo configured for ${SSH_USER}"
                 else
                     report_ko "Passwordless sudo for ${SSH_USER}"
-                    die "Cannot configure passwordless sudo. Set it up manually:\n  echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
+                    die "Cannot configure passwordless sudo. Set it up manually:\n  printf '%s\n%s\n' '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' 'Defaults:${SSH_USER} !use_pty' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
                 fi
             else
                 report_ko "Passwordless sudo for ${SSH_USER}"
-                die "Cannot configure passwordless sudo. Set it up manually:\n  echo '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
+                die "Cannot configure passwordless sudo. Set it up manually:\n  printf '%s\n%s\n' '${SSH_USER} ALL=(ALL) NOPASSWD: ALL' 'Defaults:${SSH_USER} !use_pty' | sudo tee /etc/sudoers.d/${SSH_USER}\n  sudo chmod 440 /etc/sudoers.d/${SSH_USER}"
             fi
         fi
     fi
@@ -1576,8 +1575,6 @@ phase2_restore_files() {
 
     local fixup_ok=false
     if _ssh_target "${_sudo_save}bash -s" <<SAVE_EOF 2>/dev/null; then
-# Suppress prompts (ssh -tt allocates TTY, bash would print PS1 after each line)
-PS1='' PROMPT_COMMAND='' export PS1 PROMPT_COMMAND
 set -e
 SAVE_DIR="/tmp/computile-ssh-save"
 rm -rf "\$SAVE_DIR" && mkdir -p "\$SAVE_DIR/ssh"
@@ -1627,7 +1624,7 @@ SAVE_EOF
         _setup_resilient_ssh
 
         # Now save the newly created sshd snippet into the save dir
-        _ssh_target "${_sudo_save}env PS1= PROMPT_COMMAND= bash -c '
+        _ssh_target "${_sudo_save}bash -c '
             SAVE_DIR=/tmp/computile-ssh-save
             [ -f /etc/ssh/sshd_config.d/99-computile-restore.conf ] && cp /etc/ssh/sshd_config.d/99-computile-restore.conf \$SAVE_DIR/sshd_snippet 2>/dev/null || true
             [ -f /etc/ssh/authorized_keys/${SSH_USER} ] && cp /etc/ssh/authorized_keys/${SSH_USER} \$SAVE_DIR/syswide_authorized_keys 2>/dev/null || true

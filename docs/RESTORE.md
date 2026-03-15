@@ -371,7 +371,7 @@ L'outil utilise par défaut l'utilisateur `computile-restore` sur la cible. Cet 
 ```bash
 # Sur le VM cible
 sudo useradd -r -m -s /bin/bash computile-restore
-echo "computile-restore ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/computile-restore
+printf '%s\n%s\n' 'computile-restore ALL=(ALL) NOPASSWD: ALL' 'Defaults:computile-restore !use_pty' | sudo tee /etc/sudoers.d/computile-restore
 sudo chmod 440 /etc/sudoers.d/computile-restore
 
 # Copier la clé SSH de la gateway
